@@ -29,14 +29,16 @@ go run main.go
   Your .NET reads the SQLite directly, and you never send anything.
 - You may need to re-scan the QR roughly every 20 days.
 
-## 2. Find the group in the SQLite (you have already done this)
+## 2. Find the group(s) in the SQLite (you have already done this)
 - Open `whatsapp-bridge/store/messages.db` with DB Browser for SQLite or the
   `sqlite3` CLI.
 - Tables: `chats` and `messages`.
-- The job group's `chat_jid` is `120363427094606388@g.us`. Put it in config.
+- One job group's `chat_jid` is `120363427094606388@g.us`. Put every group you
+  want ingested in `JobLens:GroupChatJids` (a list - see step 5).
 - Do NOT filter by sender: about 650 posts share the group's own id, so sender
-  does not separate jobs from promos. `IJobFeedSource` filters by `chat_jid` and
-  skips media-only rows; job vs promo is a content-structure decision.
+  does not separate jobs from promos. `IJobFeedSource` filters by
+  `WHERE chat_jid IN (...)` and skips media-only rows; job vs promo is a
+  content-structure decision.
 - The `messages` columns that matter: `chat_jid`, `sender`, `content`,
   `timestamp`, `is_from_me`, `media_type`.
 
@@ -80,9 +82,13 @@ dotnet user-secrets init
 dotnet user-secrets set "Gemini:ApiKey" "your_google_ai_studio_key"
 dotnet user-secrets set "Postgres:ConnectionString" "Host=localhost;Port=5432;Database=joblens;Username=postgres;Password=postgres"
 dotnet user-secrets set "JobLens:MessagesDbPath" "C:/path/to/whatsapp-mcp/whatsapp-bridge/store/messages.db"
-dotnet user-secrets set "JobLens:GroupChatJid" "120363427094606388@g.us"
+dotnet user-secrets set "JobLens:GroupChatJids:0" "120363427094606388@g.us"
+dotnet user-secrets set "JobLens:GroupChatJids:1" "<second_group_chat_jid>"
 ```
 Use forward slashes in the path even on Windows, and give the full absolute path.
+`GroupChatJids` is a list, so each group gets its own indexed key
+(`:0`, `:1`, ...); it stays in user-secrets rather than appsettings.json
+because a chat_jid identifies a real WhatsApp group.
 
 Committed `appsettings.json` holds only non-identifying config, the target
 category list:
@@ -91,8 +97,8 @@ category list:
   "TargetCategories": [ "Software", "QA" ]
 }
 ```
-There is no sender allowlist. The source filters by `chat_jid` and skips
-media-only rows; job vs promo is decided by content structure.
+There is no sender allowlist. The source filters by `chat_jid IN (...)` and
+skips media-only rows; job vs promo is decided by content structure.
 
 Register pgvector with Npgsql in `Program.cs`:
 ```csharp
@@ -123,7 +129,7 @@ fallback that also implements `IChatClient`.
 - Build the milestones from CLAUDE.md in order, one commit each, tests green
   before moving on:
   1. skeleton + health check + config
-  2. `IJobFeedSource` reading `messages.db`, filtered to the allowlisted sender
+  2. `IJobFeedSource` reading `messages.db`, filtered to the group chat_jids
   3. parser + category filter
   4. embed + store in pgvector, plus the semantic `query` command
   5. relevance scoring (vector prefilter, then Claude)

@@ -14,14 +14,14 @@ using System.ClientModel;  // for ApiKeyCredential
 var builder = WebApplication.CreateBuilder(args);
 var config = builder.Configuration;
 
-// JobLens config: MessagesDbPath + GroupChatJid come from user-secrets,
-// TargetCategories from appsettings. Injected later as IOptions<JobLensOptions>.
+// JobLens config: MessagesDbPath + GroupChatJids come from user-secrets (identifying),
+// TargetCategories/Profile/ScoringTopK from appsettings. Injected later as IOptions<JobLensOptions>.
 builder.Services.Configure<JobLensOptions>(config.GetSection("JobLens"));
 
 if (string.IsNullOrWhiteSpace(config["JobLens:MessagesDbPath"]))
     throw new InvalidOperationException("Missing JobLens:MessagesDbPath");
-if (string.IsNullOrWhiteSpace(config["JobLens:GroupChatJid"]))
-    throw new InvalidOperationException("Missing JobLens:GroupChatJid");
+if (config.GetSection("JobLens:GroupChatJids").Get<string[]>() is not { Length: > 0 })
+    throw new InvalidOperationException("Missing JobLens:GroupChatJids (must be a non-empty array)");
 
 // Postgres + pgvector data source, registered in DI.
 var pgConn = config["Postgres:ConnectionString"]

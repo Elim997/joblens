@@ -58,7 +58,8 @@ legitimately demonstrates both.
 ## Architecture (each stage = one interface, one implementation, wired in DI)
 
 - `IJobFeedSource`: pull new messages from the source, filtered to the target
-  group's chat_jid, skipping media-only rows. WhatsApp now, Telegram later.
+  groups' chat_jids (a list - multiple WhatsApp groups can feed the same
+  pipeline), skipping media-only rows. WhatsApp now, Telegram later.
 - `IPostingParser`: raw message -> structured `JobPosting` (title, category,
   location, seniority, stack, link). The feed uses a fixed format with a Category
   field, so this is mostly deterministic with an LLM fallback.
@@ -78,7 +79,9 @@ The semantic archive query reuses IEmbedder + IDatastore.
 
 Bridge SQLite has `chats` and `messages` tables. The `messages` columns that
 matter: `chat_jid`, `sender`, `content`, `timestamp`, `is_from_me`, `media_type`.
-The job group's `chat_jid` is `120363427094606388@g.us` (keep it in config).
+`JobLens:GroupChatJids` (user-secrets, identifying) is a list of chat_jids -
+one job group is `120363427094606388@g.us`; more can be added to feed the
+same pipeline. The SQLite query filters `WHERE chat_jid IN (...)`.
 
 Filter by `chat_jid`, NOT by sender. In the real data ~650 posts share one sender
 id (the group's own number), so sender does not separate jobs from promos. Skip
@@ -97,10 +100,13 @@ back to the LLM only when the structure check fails:
 - Requirement bullet lines follow.
 - Apply URL: the first link that is NOT a `referally.*` link (e.g. a company
   careers page or linkedin.com/jobs).
-- Strip boilerplate: "Join our community" lines and any block linking
-  referally.link, referally-jobos.lovable.app, or referally.setmore.com. These
-  are ads and are sometimes appended inside a real job post, so strip the block,
-  do not drop the message.
+- Strip boilerplate: "Join our community" lines, any block linking
+  referally.link, referally-jobos.lovable.app, or referally.setmore.com, and
+  any trailing ad block starting with another `*bold headline*` line (e.g. a
+  paid interview-prep pitch appended after the real posting, such as "*Book a
+  prep session with Nicole*..."). These are ads and are sometimes appended
+  inside a real job post, so truncate the description at the first such block
+  (nothing from it or after it is kept), do not drop the message.
 
 Promos (a paid interview-prep service, often Hebrew, sometimes image-only) and
 boilerplate carry no Title/Company/Category, so the structure check drops them.
@@ -108,10 +114,10 @@ Real job posts also appear in Hebrew, so never filter on language.
 
 ## Build order (one commit per milestone, test before moving on)
 
-1. Skeleton + config: API key, the group chat_jid, and the messages.db path, all
+1. Skeleton + config: API key, the group chat_jids, and the messages.db path, all
    from env or user-secrets. Nothing sensitive hardcoded.
 2. IJobFeedSource: read new messages from the bridge store, filtered to the group
-   chat_jid and skipping media-only rows. Verify you get the raw postings.
+   chat_jids and skipping media-only rows. Verify you get the raw postings.
 3. Parse + category filter: raw -> JobPosting, drop off-category. Test on real
    samples.
 4. Embed + store in pgvector. Add a `query` command for semantic archive search.
@@ -132,8 +138,8 @@ unfinished.
   string (`@"..."`).
 - Idiomatic .NET: DI, async/await, nullable reference types on.
 - Secrets (the Gemini API key, the WhatsApp session and bridge token) live in
-  env, user-secrets, or gitignored config. NEVER commit them. The group chat_jid,
-  messages.db path, and target-category list are config, not source.
+  env, user-secrets, or gitignored config. NEVER commit them. The group
+  chat_jids, messages.db path, and target-category list are config, not source.
 - Prefer clear over clever. Someone will read this in an interview.
 
 ## Commands (fill in as they stabilize)

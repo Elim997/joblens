@@ -17,7 +17,7 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
                 config.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     ["JobLens:MessagesDbPath"] = "C:/fake/messages.db",
-                    ["JobLens:GroupChatJid"] = "fake@g.us",
+                    ["JobLens:GroupChatJids:0"] = "fake@g.us",
                     ["Postgres:ConnectionString"] = "Host=fake;Database=fake;Username=fake;Password=fake",
                     ["Gemini:ApiKey"] = "fake-key",
                 });

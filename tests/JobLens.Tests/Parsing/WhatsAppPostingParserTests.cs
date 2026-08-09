@@ -27,6 +27,15 @@ public class WhatsAppPostingParserTests
         "‎הצטרפו לשירות ההכנה לראיונות שלנו\n‎\n" +
         "‎https://referally.setmore.com/booking";
 
+    // A real job post with a trailing ad block: a second *bold headline* promo
+    // pitch appended after the requirements/apply URL, not the referally.link form.
+    private const string RealJobContentWithAdBlock =
+        "‎*Backend Developer* / TechCo\n‎\n‎_Tel Aviv_ | _Software_\n‎\n" +
+        "- ‎3+ years experience with C# and .NET\n‎\n" +
+        "‎https://example.com/careers/backend\n‎\n" +
+        "‎*Book a prep session with Nicole* - ex-Google recruiter, now a hiring " +
+        "interviewer helping candidates land offers >>";
+
     private static RawMessage Raw(string id, string content) =>
         new(id, ChatJid, "120363427094606388", content, DateTimeOffset.Parse("2026-08-09T12:00:00+03:00"));
 
@@ -62,6 +71,23 @@ public class WhatsAppPostingParserTests
         Assert.Equal("Haifa", posting.Location);
         Assert.Equal("Software", posting.Category);
         Assert.Equal("https://www.linkedin.com/jobs/view/4450955364", posting.ApplyUrl);
+    }
+
+    [Fact]
+    public void Parse_RealJobPost_TrailingBoldHeadlineAdBlock_ExcludedFromDescription()
+    {
+        var parser = new WhatsAppPostingParser();
+
+        var posting = parser.Parse(Raw("job-3", RealJobContentWithAdBlock));
+
+        Assert.NotNull(posting);
+        Assert.Equal("Backend Developer", posting!.Title);
+        Assert.Equal("TechCo", posting.Company);
+        Assert.Equal("https://example.com/careers/backend", posting.ApplyUrl);
+        Assert.Equal("- 3+ years experience with C# and .NET", posting.Description);
+        Assert.DoesNotContain("Nicole", posting.Description);
+        Assert.DoesNotContain("prep session", posting.Description);
+        Assert.DoesNotContain("hiring interviewer", posting.Description);
     }
 
     [Fact]

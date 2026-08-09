@@ -6,9 +6,10 @@ namespace JobLens.Core.Parsing;
 /// <summary>
 /// Deterministic parser for the job-bot's fixed message layout:
 /// bold "*Title* [ref] / Company" line, italic "_Location_ | _Category_" line,
-/// requirement bullets, an apply link, and optional referally.* boilerplate.
-/// Messages that don't match this layout (promos, ads) are not job posts and
-/// parse to null rather than being force-fit.
+/// requirement bullets, an apply link, and an optional trailing ad block
+/// (referally.* boilerplate, or another *bold headline* promo). Messages that
+/// don't match this layout (promos, ads) are not job posts and parse to null
+/// rather than being force-fit.
 /// </summary>
 public partial class WhatsAppPostingParser : IPostingParser
 {
@@ -54,7 +55,15 @@ public partial class WhatsAppPostingParser : IPostingParser
         var location = locationCategoryMatch.Groups["location"].Value.Trim();
         var category = locationCategoryMatch.Groups["category"].Value.Trim();
 
-        var bodyLines = lines.Skip(2).Where(l => !IsBoilerplate(l)).ToList();
+        // A trailing ad block (referally boilerplate, or another *bold headline* promo
+        // like "*Book a prep session with Nicole*...") is sometimes appended after a
+        // real posting. Truncate at the first such line - nothing from it or after it
+        // belongs to the description or apply URL.
+        var bodyLines = lines.Skip(2).ToList();
+        var adBlockStart = bodyLines.FindIndex(IsAdBlockStart);
+        if (adBlockStart >= 0)
+            bodyLines = bodyLines[..adBlockStart];
+
         var applyUrl = ExtractApplyUrl(bodyLines);
         var description = string.Join('\n', bodyLines.Where(l => !UrlRegex().IsMatch(l)));
 
@@ -75,12 +84,20 @@ public partial class WhatsAppPostingParser : IPostingParser
         return string.Empty;
     }
 
+    private static bool IsAdBlockStart(string line) =>
+        IsBoilerplate(line) || BoldHeadlineRegex().IsMatch(line);
+
     private static bool IsBoilerplate(string line) =>
         BoilerplateMarkers.Any(marker => line.Contains(marker, StringComparison.OrdinalIgnoreCase));
 
     // *Title* [optional ref] / Company - captures the bolded title and everything after it.
     [GeneratedRegex(@"^\*(?<title>.+?)\*(?<rest>.*)$")]
     private static partial Regex TitleLineRegex();
+
+    // Any line starting with a bolded headline, e.g. a second promo pitch appended
+    // after the real posting's requirements/apply URL.
+    [GeneratedRegex(@"^\*.+\*")]
+    private static partial Regex BoldHeadlineRegex();
 
     // _Location_ | _Category_
     [GeneratedRegex(@"^_(?<location>.+?)_\s*\|\s*_(?<category>.+?)_$")]

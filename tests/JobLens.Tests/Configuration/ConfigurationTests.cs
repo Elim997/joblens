@@ -14,7 +14,8 @@ public class ConfigurationTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["JobLens:MessagesDbPath"] = "C:/data/messages.db",
-                ["JobLens:GroupChatJid"] = "120363427094606388@g.us",
+                ["JobLens:GroupChatJids:0"] = "120363427094606388@g.us",
+                ["JobLens:GroupChatJids:1"] = "111111111111111111@g.us",
                 ["JobLens:TargetCategories:0"] = "Software",
                 ["JobLens:TargetCategories:1"] = "QA",
             })
@@ -27,7 +28,7 @@ public class ConfigurationTests
         var options = provider.GetRequiredService<IOptions<JobLensOptions>>().Value;
 
         Assert.Equal("C:/data/messages.db", options.MessagesDbPath);
-        Assert.Equal("120363427094606388@g.us", options.GroupChatJid);
+        Assert.Equal(["120363427094606388@g.us", "111111111111111111@g.us"], options.GroupChatJids);
         Assert.Equal(["Software", "QA"], options.TargetCategories);
     }
 }

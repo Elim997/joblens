@@ -23,15 +23,19 @@ public class SqliteJobFeedSource(IOptions<JobLensOptions> options) : IJobFeedSou
         await connection.OpenAsync(cancellationToken);
 
         await using var command = connection.CreateCommand();
-        command.CommandText = """
+        // Placeholder names are generated from the array index, not user input, so
+        // interpolating them into the IN(...) list is safe; values are parameterized.
+        var placeholders = _options.GroupChatJids.Select((_, i) => $"@chatJid{i}");
+        command.CommandText = $"""
             SELECT id, chat_jid, sender, content, timestamp
             FROM messages
-            WHERE chat_jid = @chatJid
+            WHERE chat_jid IN ({string.Join(", ", placeholders)})
               AND content IS NOT NULL AND content <> ''
               AND (media_type IS NULL OR media_type = '')
             ORDER BY timestamp ASC
             """;
-        command.Parameters.AddWithValue("@chatJid", _options.GroupChatJid);
+        for (var i = 0; i < _options.GroupChatJids.Length; i++)
+            command.Parameters.AddWithValue($"@chatJid{i}", _options.GroupChatJids[i]);
 
         var messages = new List<RawMessage>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
