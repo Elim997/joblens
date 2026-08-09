@@ -9,6 +9,8 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
+    <!-- Pin past the transitive 2.0.0 pulled in by Microsoft.AspNetCore.OpenApi: GHSA-v5pm-xwqc-g5wc (stack overflow on circular schema refs), fixed 2.7.5+. -->
+    <PackageReference Include="Microsoft.OpenApi" Version="2.11.0" />
   </ItemGroup>
 
   <ItemGroup>

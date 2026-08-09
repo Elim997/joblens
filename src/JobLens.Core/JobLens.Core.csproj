@@ -8,6 +8,8 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <!-- Pin past the transitive 2.1.11 pulled in by Microsoft.Data.Sqlite: GHSA-2m69-gcr7-jv3q (bundled SQLite < 3.50.2, memory corruption). -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
     <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.3" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.8.3" />
     <PackageReference Include="Npgsql" Version="10.0.3" />

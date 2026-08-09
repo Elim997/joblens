@@ -12,6 +12,13 @@ public interface IDatastore
     /// </summary>
     Task EnsureSchemaAsync(int dimension, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Message ids already stored, so a re-ingest can skip re-embedding them - embedding
+    /// is the quota-limited step, not this lookup. Returns empty if the table doesn't
+    /// exist yet (nothing has ever been embedded, so nothing needs skipping).
+    /// </summary>
+    Task<IReadOnlySet<string>> GetExistingMessageIdsAsync(CancellationToken cancellationToken = default);
+
     Task UpsertAsync(string messageId, JobPosting posting, float[] embedding, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<SimilarPosting>> QuerySimilarAsync(float[] queryEmbedding, int topK, CancellationToken cancellationToken = default);

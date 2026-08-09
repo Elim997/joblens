@@ -34,6 +34,29 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         await tableCommand.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlySet<string>> GetExistingMessageIdsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+
+        await using (var existsCommand = connection.CreateCommand())
+        {
+            existsCommand.CommandText = "SELECT to_regclass('public.job_postings') IS NOT NULL;";
+            var tableExists = (bool)(await existsCommand.ExecuteScalarAsync(cancellationToken))!;
+            if (!tableExists)
+                return new HashSet<string>();
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT message_id FROM job_postings;";
+
+        var ids = new HashSet<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            ids.Add(reader.GetString(0));
+
+        return ids;
+    }
+
     public async Task UpsertAsync(string messageId, JobPosting posting, float[] embedding, CancellationToken cancellationToken = default)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);

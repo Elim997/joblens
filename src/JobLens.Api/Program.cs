@@ -57,7 +57,9 @@ if (app.Environment.IsDevelopment())
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 // Runs Feed -> Parse -> category filter -> Embed -> Store for every message currently
-// in the bridge's messages.db. The first embedding's live dimension sizes the schema.
+// in the bridge's messages.db. Already-stored message ids are skipped before embedding
+// (embedding is the quota-limited step) and the remainder is embedded in batches, not
+// one API call per posting. The first embedding's live dimension sizes the schema.
 app.MapPost("/ingest", async (
     IJobFeedSource feedSource,
     IPostingParser parser,
@@ -68,22 +70,25 @@ app.MapPost("/ingest", async (
 {
     var messages = await feedSource.GetMessagesAsync(cancellationToken);
     var targetCategories = new HashSet<string>(options.Value.TargetCategories, StringComparer.OrdinalIgnoreCase);
-    var toStore = messages
+    var candidates = messages
         .Select(m => (Message: m, Posting: parser.Parse(m)))
         .Where(x => x.Posting is not null && targetCategories.Contains(x.Posting.Category))
         .ToList();
 
-    var stored = 0;
-    foreach (var (message, posting) in toStore)
+    var existingIds = await datastore.GetExistingMessageIdsAsync(cancellationToken);
+    var toEmbed = candidates.Where(x => !existingIds.Contains(x.Message.Id)).ToList();
+
+    if (toEmbed.Count > 0)
     {
-        var embedding = await embedder.EmbedAsync(JobPostingTextNormalizer.ToEmbeddingText(posting!), cancellationToken);
-        if (stored == 0)
-            await datastore.EnsureSchemaAsync(embedding.Length, cancellationToken);
-        await datastore.UpsertAsync(message.Id, posting!, embedding, cancellationToken);
-        stored++;
+        var texts = toEmbed.Select(x => JobPostingTextNormalizer.ToEmbeddingText(x.Posting!)).ToList();
+        var embeddings = await embedder.EmbedBatchAsync(texts, cancellationToken);
+
+        await datastore.EnsureSchemaAsync(embeddings[0].Length, cancellationToken);
+        for (var i = 0; i < toEmbed.Count; i++)
+            await datastore.UpsertAsync(toEmbed[i].Message.Id, toEmbed[i].Posting!, embeddings[i], cancellationToken);
     }
 
-    return Results.Ok(new { read = messages.Count, stored });
+    return Results.Ok(new { read = messages.Count, alreadyStored = candidates.Count - toEmbed.Count, embedded = toEmbed.Count });
 });
 
 // Semantic archive search: embeds the query text and ranks stored postings by cosine similarity.

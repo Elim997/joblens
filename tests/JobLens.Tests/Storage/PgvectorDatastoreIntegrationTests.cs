@@ -84,12 +84,15 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
         await _datastore.UpsertAsync(qaId, qaPosting, qaEmbedding);
 
         var queryEmbedding = await _embedder.EmbedAsync("C# backend developer with distributed systems experience");
-        var results = await _datastore.QuerySimilarAsync(queryEmbedding, topK: 2);
 
-        Assert.Equal(2, results.Count);
-        Assert.Equal("Senior Backend Engineer", results[0].Posting.Title);
-        Assert.Equal("QA Automation Engineer", results[1].Posting.Title);
-        Assert.True(results[0].Similarity > results[1].Similarity);
+        // The table also holds real ingested postings (SETUP.md), so top-K isn't
+        // necessarily just these two rows - compare their scores directly instead
+        // of assuming they're the global top-2.
+        var results = await _datastore.QuerySimilarAsync(queryEmbedding, topK: 10_000);
+        var backendResult = results.Single(r => r.Posting.ApplyUrl == backendPosting.ApplyUrl);
+        var qaResult = results.Single(r => r.Posting.ApplyUrl == qaPosting.ApplyUrl);
+
+        Assert.True(backendResult.Similarity > qaResult.Similarity);
     }
 
     [Fact]
@@ -99,5 +102,40 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
 
         await _datastore.EnsureSchemaAsync(probe.Length);
         await _datastore.EnsureSchemaAsync(probe.Length); // must not throw on a second call
+    }
+
+    [Fact]
+    public async Task EmbedBatchAsync_EmbedsMultipleTextsInOneRequest()
+    {
+        var texts = new[]
+        {
+            "Senior Backend Engineer at Acme (Tel Aviv, Software)\n- 5+ years C#",
+            "QA Automation Engineer at Beta (Haifa, QA)\n- Selenium and Playwright",
+        };
+
+        var vectors = await _embedder.EmbedBatchAsync(texts);
+
+        Assert.Equal(2, vectors.Count);
+        Assert.All(vectors, v => Assert.Equal(GeminiEmbedder.Dimensions, v.Length));
+        Assert.NotEqual(vectors[0], vectors[1]);
+    }
+
+    [Fact]
+    public async Task GetExistingMessageIdsAsync_ReflectsStoredRows()
+    {
+        var id = $"test-milestone4-dedupe-{Guid.NewGuid():N}";
+        _testMessageIds.Add(id);
+
+        var posting = new JobPosting(
+            "Dedupe Test Posting", "Acme", "Tel Aviv", "Software",
+            "https://example.com/dedupe", "- test row for GetExistingMessageIdsAsync");
+        var embedding = await _embedder.EmbedAsync(JobPostingTextNormalizer.ToEmbeddingText(posting));
+        await _datastore.EnsureSchemaAsync(embedding.Length);
+        await _datastore.UpsertAsync(id, posting, embedding);
+
+        var existingIds = await _datastore.GetExistingMessageIdsAsync();
+
+        Assert.Contains(id, existingIds);
+        Assert.DoesNotContain($"not-a-real-id-{Guid.NewGuid():N}", existingIds);
     }
 }
