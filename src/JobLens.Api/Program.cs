@@ -1,4 +1,5 @@
 using JobLens.Core.Configuration;
+using JobLens.Core.Feed;
 using Microsoft.Extensions.AI;
 using Npgsql;
 using OpenAI;
@@ -34,6 +35,8 @@ builder.Services.AddSingleton<IChatClient>(
     gemini.GetChatClient("gemini-2.5-flash").AsIChatClient());
 builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
     gemini.GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator());
+
+builder.Services.AddSingleton<IJobFeedSource, SqliteJobFeedSource>();
 
 builder.Services.AddOpenApi();
 
