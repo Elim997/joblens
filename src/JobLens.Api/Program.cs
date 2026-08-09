@@ -1,5 +1,6 @@
 using JobLens.Core.Configuration;
 using JobLens.Core.Feed;
+using JobLens.Core.Parsing;
 using Microsoft.Extensions.AI;
 using Npgsql;
 using OpenAI;
@@ -37,6 +38,7 @@ builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
     gemini.GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator());
 
 builder.Services.AddSingleton<IJobFeedSource, SqliteJobFeedSource>();
+builder.Services.AddSingleton<IPostingParser, WhatsAppPostingParser>();
 
 builder.Services.AddOpenApi();
 
