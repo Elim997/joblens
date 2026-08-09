@@ -1,0 +1,136 @@
+# SETUP.md: Environment Setup (Windows)
+
+Do these in order. Steps 1 to 5 are things you run yourself in a terminal. Step 6
+is where you hand off to Claude Code. Do not start Claude Code building until the
+WhatsApp bridge and Postgres are both up, so it has real data and a real database
+to work against instead of mocks.
+
+## 0. Install prerequisites
+- .NET 10 SDK
+- Docker Desktop (runs Postgres + pgvector)
+- Go (builds and runs the WhatsApp bridge)
+- A C compiler for Windows: install MSYS2, then add its `ucrt64\bin` to PATH.
+  The bridge's SQLite driver needs CGO, which needs a C compiler on Windows.
+- Git
+- One API key: a Google AI Studio key (free tier, no card). It covers both the
+  chat model and embeddings, so there is no separate embeddings signup.
+
+## 1. Stand up the WhatsApp bridge (read-only data source)
+```
+git clone https://github.com/lharries/whatsapp-mcp.git
+cd whatsapp-mcp/whatsapp-bridge
+go env -w CGO_ENABLED=1
+go run main.go
+```
+- Scan the QR with the phone whose number is in the job group.
+- Wait a few minutes for message history to sync.
+- The message database lands at `whatsapp-bridge/store/messages.db`.
+- You only need this Go bridge. Skip the Python MCP server in that repo entirely.
+  Your .NET reads the SQLite directly, and you never send anything.
+- You may need to re-scan the QR roughly every 20 days.
+
+## 2. Find the group in the SQLite (you have already done this)
+- Open `whatsapp-bridge/store/messages.db` with DB Browser for SQLite or the
+  `sqlite3` CLI.
+- Tables: `chats` and `messages`.
+- The job group's `chat_jid` is `120363427094606388@g.us`. Put it in config.
+- Do NOT filter by sender: about 650 posts share the group's own id, so sender
+  does not separate jobs from promos. `IJobFeedSource` filters by `chat_jid` and
+  skips media-only rows; job vs promo is a content-structure decision.
+- The `messages` columns that matter: `chat_jid`, `sender`, `content`,
+  `timestamp`, `is_from_me`, `media_type`.
+
+## 3. Stand up Postgres + pgvector (Docker)
+```
+docker run -d --name joblens-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 pgvector/pgvector:pg17
+docker exec -it joblens-pg createdb -U postgres joblens
+docker exec -it joblens-pg psql -U postgres -d joblens -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+- If port 5432 is already taken, use `-p 5433:5432` and adjust the connection
+  string later.
+
+## 4. Scaffold the .NET solution
+```
+dotnet new sln -n JobLens
+dotnet new webapi -n JobLens.Api -o src/JobLens.Api
+dotnet new classlib -n JobLens.Core -o src/JobLens.Core
+dotnet new xunit -n JobLens.Tests -o tests/JobLens.Tests
+dotnet sln add src/JobLens.Api src/JobLens.Core tests/JobLens.Tests
+dotnet add src/JobLens.Api reference src/JobLens.Core
+dotnet add tests/JobLens.Tests reference src/JobLens.Core
+```
+Packages:
+```
+dotnet add src/JobLens.Core package Microsoft.Extensions.AI
+dotnet add src/JobLens.Core package Microsoft.Extensions.AI.OpenAI
+dotnet add src/JobLens.Core package OpenAI   # used to call Gemini's OpenAI-compatible endpoint
+dotnet add src/JobLens.Core package Npgsql
+dotnet add src/JobLens.Core package Pgvector
+dotnet add src/JobLens.Core package Microsoft.Data.Sqlite
+# Only if you later swap the provider to Claude:
+# dotnet add src/JobLens.Core package Anthropic
+```
+Put `CLAUDE.md` at the repo root (you already have it).
+
+## 5. Configure secrets and settings
+Secrets and machine-specific values, never committed (this repo may go public):
+```
+cd src/JobLens.Api
+dotnet user-secrets init
+dotnet user-secrets set "Gemini:ApiKey" "your_google_ai_studio_key"
+dotnet user-secrets set "Postgres:ConnectionString" "Host=localhost;Port=5432;Database=joblens;Username=postgres;Password=postgres"
+dotnet user-secrets set "JobLens:MessagesDbPath" "C:/path/to/whatsapp-mcp/whatsapp-bridge/store/messages.db"
+dotnet user-secrets set "JobLens:GroupChatJid" "120363427094606388@g.us"
+```
+Use forward slashes in the path even on Windows, and give the full absolute path.
+
+Committed `appsettings.json` holds only non-identifying config, the target
+category list:
+```json
+"JobLens": {
+  "TargetCategories": [ "Software", "QA" ]
+}
+```
+There is no sender allowlist. The source filters by `chat_jid` and skips
+media-only rows; job vs promo is decided by content structure.
+
+Register pgvector with Npgsql in `Program.cs`:
+```csharp
+var dataSourceBuilder = new NpgsqlDataSourceBuilder(connString);
+dataSourceBuilder.UseVector();
+var dataSource = dataSourceBuilder.Build();
+```
+
+Register Gemini through the OpenAI client pointed at its compatibility endpoint,
+exposed as the Microsoft.Extensions.AI abstractions:
+```csharp
+var gemini = new OpenAIClient(
+    new ApiKeyCredential(geminiKey),
+    new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") });
+
+IChatClient chat = gemini.GetChatClient("gemini-2.5-flash").AsIChatClient();
+IEmbeddingGenerator<string, Embedding<float>> embeddings =
+    gemini.GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator();
+```
+Confirm the OpenAI .NET SDK behaves against the compatibility endpoint. If you
+hit friction, a community Gemini .NET package (e.g. Mscc.GenerativeAI) is a
+fallback that also implements `IChatClient`.
+
+## 6. Hand off to Claude Code
+- Open the repo folder in VS Code and start Claude Code.
+- Confirm it picked up `CLAUDE.md`: ask it to summarize the project; it should
+  describe the read-only WhatsApp pipeline, not guess.
+- Build the milestones from CLAUDE.md in order, one commit each, tests green
+  before moving on:
+  1. skeleton + health check + config
+  2. `IJobFeedSource` reading `messages.db`, filtered to the allowlisted sender
+  3. parser + category filter
+  4. embed + store in pgvector, plus the semantic `query` command
+  5. relevance scoring (vector prefilter, then Claude)
+  6. notify on matches
+  7. eval harness
+- Give Claude Code the `messages.db` path and let it inspect the schema for the
+  `IJobFeedSource` query.
+
+Do not let it scaffold a frontend, app Dockerfile, or Telegram source until the
+WhatsApp-to-notify loop runs end to end and the eval passes.

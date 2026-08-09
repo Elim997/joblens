@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/JobLens.Api/JobLens.Api.csproj" />
+    <Project Path="src/JobLens.Core/JobLens.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/JobLens.Tests/JobLens.Tests.csproj" />
+  </Folder>
+</Solution>
