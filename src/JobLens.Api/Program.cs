@@ -69,9 +69,11 @@ app.MapPost("/ingest", async (
     CancellationToken cancellationToken) =>
 {
     var messages = await feedSource.GetMessagesAsync(cancellationToken);
+    var parsed = messages.Select(m => (Message: m, Posting: parser.Parse(m))).ToList();
+    var parsedCount = parsed.Count(x => x.Posting is not null);
+
     var targetCategories = new HashSet<string>(options.Value.TargetCategories, StringComparer.OrdinalIgnoreCase);
-    var candidates = messages
-        .Select(m => (Message: m, Posting: parser.Parse(m)))
+    var candidates = parsed
         .Where(x => x.Posting is not null && targetCategories.Contains(x.Posting.Category))
         .ToList();
 
@@ -88,7 +90,14 @@ app.MapPost("/ingest", async (
             await datastore.UpsertAsync(toEmbed[i].Message.Id, toEmbed[i].Posting!, embeddings[i], cancellationToken);
     }
 
-    return Results.Ok(new { read = messages.Count, alreadyStored = candidates.Count - toEmbed.Count, embedded = toEmbed.Count });
+    return Results.Ok(new
+    {
+        fetched = messages.Count,
+        parsed = parsedCount,
+        filteredOut = parsedCount - candidates.Count,
+        alreadyStored = candidates.Count - toEmbed.Count,
+        embedded = toEmbed.Count,
+    });
 });
 
 // Semantic archive search: embeds the query text and ranks stored postings by cosine similarity.
