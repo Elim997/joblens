@@ -1,0 +1,96 @@
+using JobLens.Core.Parsing;
+using Npgsql;
+using Pgvector;
+
+namespace JobLens.Core.Storage;
+
+public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
+{
+    public async Task EnsureSchemaAsync(int dimension, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+
+        await using (var extensionCommand = connection.CreateCommand())
+        {
+            extensionCommand.CommandText = "CREATE EXTENSION IF NOT EXISTS vector;";
+            await extensionCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var tableCommand = connection.CreateCommand();
+        // dimension comes from a live embedding call, not a hardcoded literal - see GeminiEmbedder.
+        tableCommand.CommandText = $"""
+            CREATE TABLE IF NOT EXISTS job_postings (
+                message_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                location TEXT NOT NULL,
+                category TEXT NOT NULL,
+                apply_url TEXT NOT NULL,
+                description TEXT NOT NULL,
+                embedding vector({dimension}) NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """;
+        await tableCommand.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task UpsertAsync(string messageId, JobPosting posting, float[] embedding, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO job_postings (message_id, title, company, location, category, apply_url, description, embedding)
+            VALUES (@messageId, @title, @company, @location, @category, @applyUrl, @description, @embedding)
+            ON CONFLICT (message_id) DO UPDATE SET
+                title = EXCLUDED.title,
+                company = EXCLUDED.company,
+                location = EXCLUDED.location,
+                category = EXCLUDED.category,
+                apply_url = EXCLUDED.apply_url,
+                description = EXCLUDED.description,
+                embedding = EXCLUDED.embedding;
+            """;
+        command.Parameters.AddWithValue("messageId", messageId);
+        command.Parameters.AddWithValue("title", posting.Title);
+        command.Parameters.AddWithValue("company", posting.Company);
+        command.Parameters.AddWithValue("location", posting.Location);
+        command.Parameters.AddWithValue("category", posting.Category);
+        command.Parameters.AddWithValue("applyUrl", posting.ApplyUrl);
+        command.Parameters.AddWithValue("description", posting.Description);
+        command.Parameters.AddWithValue("embedding", new Vector(embedding));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<SimilarPosting>> QuerySimilarAsync(float[] queryEmbedding, int topK, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        // <=> is pgvector's cosine distance; similarity = 1 - distance. Must stay cosine
+        // (vector_cosine_ops) if an ANN index is added later, to match this operator.
+        command.CommandText = """
+            SELECT title, company, location, category, apply_url, description,
+                   1 - (embedding <=> @queryEmbedding) AS similarity
+            FROM job_postings
+            ORDER BY embedding <=> @queryEmbedding
+            LIMIT @topK;
+            """;
+        command.Parameters.AddWithValue("queryEmbedding", new Vector(queryEmbedding));
+        command.Parameters.AddWithValue("topK", topK);
+
+        var results = new List<SimilarPosting>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var posting = new JobPosting(
+                Title: reader.GetString(0),
+                Company: reader.GetString(1),
+                Location: reader.GetString(2),
+                Category: reader.GetString(3),
+                ApplyUrl: reader.GetString(4),
+                Description: reader.GetString(5));
+            results.Add(new SimilarPosting(posting, reader.GetDouble(6)));
+        }
+
+        return results;
+    }
+}

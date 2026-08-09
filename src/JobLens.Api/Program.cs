@@ -1,7 +1,10 @@
 using JobLens.Core.Configuration;
+using JobLens.Core.Embedding;
 using JobLens.Core.Feed;
 using JobLens.Core.Parsing;
+using JobLens.Core.Storage;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using OpenAI;
 using Pgvector;            // for UseVector()
@@ -39,6 +42,8 @@ builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
 
 builder.Services.AddSingleton<IJobFeedSource, SqliteJobFeedSource>();
 builder.Services.AddSingleton<IPostingParser, WhatsAppPostingParser>();
+builder.Services.AddSingleton<IEmbedder, GeminiEmbedder>();
+builder.Services.AddSingleton<IDatastore, PgvectorDatastore>();
 
 builder.Services.AddOpenApi();
 
@@ -50,6 +55,50 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+// Runs Feed -> Parse -> category filter -> Embed -> Store for every message currently
+// in the bridge's messages.db. The first embedding's live dimension sizes the schema.
+app.MapPost("/ingest", async (
+    IJobFeedSource feedSource,
+    IPostingParser parser,
+    IEmbedder embedder,
+    IDatastore datastore,
+    IOptions<JobLensOptions> options,
+    CancellationToken cancellationToken) =>
+{
+    var messages = await feedSource.GetMessagesAsync(cancellationToken);
+    var targetCategories = new HashSet<string>(options.Value.TargetCategories, StringComparer.OrdinalIgnoreCase);
+    var toStore = messages
+        .Select(m => (Message: m, Posting: parser.Parse(m)))
+        .Where(x => x.Posting is not null && targetCategories.Contains(x.Posting.Category))
+        .ToList();
+
+    var stored = 0;
+    foreach (var (message, posting) in toStore)
+    {
+        var embedding = await embedder.EmbedAsync(JobPostingTextNormalizer.ToEmbeddingText(posting!), cancellationToken);
+        if (stored == 0)
+            await datastore.EnsureSchemaAsync(embedding.Length, cancellationToken);
+        await datastore.UpsertAsync(message.Id, posting!, embedding, cancellationToken);
+        stored++;
+    }
+
+    return Results.Ok(new { read = messages.Count, stored });
+});
+
+// Semantic archive search: embeds the query text and ranks stored postings by cosine similarity.
+app.MapGet("/query", async (
+    string text,
+    int? topK,
+    IEmbedder embedder,
+    IDatastore datastore,
+    CancellationToken cancellationToken) =>
+{
+    var queryEmbedding = await embedder.EmbedAsync(text, cancellationToken);
+    await datastore.EnsureSchemaAsync(queryEmbedding.Length, cancellationToken);
+    var results = await datastore.QuerySimilarAsync(queryEmbedding, topK ?? 5, cancellationToken);
+    return Results.Ok(results);
+});
 
 app.Run();
 
