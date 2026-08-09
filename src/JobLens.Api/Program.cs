@@ -2,6 +2,7 @@ using JobLens.Core.Configuration;
 using JobLens.Core.Embedding;
 using JobLens.Core.Feed;
 using JobLens.Core.Parsing;
+using JobLens.Core.Scoring;
 using JobLens.Core.Storage;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
@@ -35,8 +36,11 @@ var geminiKey = config["Gemini:ApiKey"]
 var gemini = new OpenAIClient(
     new ApiKeyCredential(geminiKey),
     new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") });
+// gemini-2.5-flash and gemini-2.5-flash-lite are deprecated (404 "no longer
+// available to new users" as of this key). gemini-flash-latest is Google's rolling
+// alias to their current flash model - confirmed working live; see CLAUDE.md.
 builder.Services.AddSingleton<IChatClient>(
-    gemini.GetChatClient("gemini-2.5-flash").AsIChatClient());
+    gemini.GetChatClient("gemini-flash-latest").AsIChatClient());
 builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
     gemini.GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator());
 
@@ -44,6 +48,8 @@ builder.Services.AddSingleton<IJobFeedSource, SqliteJobFeedSource>();
 builder.Services.AddSingleton<IPostingParser, WhatsAppPostingParser>();
 builder.Services.AddSingleton<IEmbedder, GeminiEmbedder>();
 builder.Services.AddSingleton<IDatastore, PgvectorDatastore>();
+builder.Services.AddSingleton<IProfileEmbeddingProvider, ProfileEmbeddingProvider>();
+builder.Services.AddSingleton<IRelevanceScorer, GeminiRelevanceScorer>();
 
 builder.Services.AddOpenApi();
 
@@ -60,11 +66,16 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 // in the bridge's messages.db. Already-stored message ids are skipped before embedding
 // (embedding is the quota-limited step) and the remainder is embedded in batches, not
 // one API call per posting. The first embedding's live dimension sizes the schema.
+// Scoring here is a convenience over just this run's newly-embedded batch, not the
+// whole archive - Milestone 6's /run covers postings ingested before the profile
+// existed by pulling unscored postings from pgvector instead.
 app.MapPost("/ingest", async (
     IJobFeedSource feedSource,
     IPostingParser parser,
     IEmbedder embedder,
     IDatastore datastore,
+    IRelevanceScorer scorer,
+    IProfileEmbeddingProvider profileEmbeddingProvider,
     IOptions<JobLensOptions> options,
     CancellationToken cancellationToken) =>
 {
@@ -80,6 +91,7 @@ app.MapPost("/ingest", async (
     var existingIds = await datastore.GetExistingMessageIdsAsync(cancellationToken);
     var toEmbed = candidates.Where(x => !existingIds.Contains(x.Message.Id)).ToList();
 
+    IReadOnlyList<ScoredPosting> matches = [];
     if (toEmbed.Count > 0)
     {
         var texts = toEmbed.Select(x => JobPostingTextNormalizer.ToEmbeddingText(x.Posting!)).ToList();
@@ -88,6 +100,10 @@ app.MapPost("/ingest", async (
         await datastore.EnsureSchemaAsync(embeddings[0].Length, cancellationToken);
         for (var i = 0; i < toEmbed.Count; i++)
             await datastore.UpsertAsync(toEmbed[i].Message.Id, toEmbed[i].Posting!, embeddings[i], cancellationToken);
+
+        var profileEmbedding = await profileEmbeddingProvider.GetProfileEmbeddingAsync(cancellationToken);
+        var scoringCandidates = toEmbed.Select((x, i) => (x.Posting!, embeddings[i])).ToList();
+        matches = await scorer.ScoreAsync(scoringCandidates, profileEmbedding, cancellationToken);
     }
 
     return Results.Ok(new
@@ -97,6 +113,7 @@ app.MapPost("/ingest", async (
         filteredOut = parsedCount - candidates.Count,
         alreadyStored = candidates.Count - toEmbed.Count,
         embedded = toEmbed.Count,
+        matches,
     });
 });
 

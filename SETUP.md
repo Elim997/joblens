@@ -108,7 +108,7 @@ var gemini = new OpenAIClient(
     new ApiKeyCredential(geminiKey),
     new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") });
 
-IChatClient chat = gemini.GetChatClient("gemini-2.5-flash").AsIChatClient();
+IChatClient chat = gemini.GetChatClient("gemini-flash-latest").AsIChatClient();
 IEmbeddingGenerator<string, Embedding<float>> embeddings =
     gemini.GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator();
 ```

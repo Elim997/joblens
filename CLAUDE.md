@@ -38,8 +38,12 @@ legitimately demonstrates both.
   Endpoint: https://generativelanguage.googleapis.com/v1beta/openai/ . Auth is
   your Google AI Studio key sent as a Bearer token. One key covers both chat
   and embeddings, so there is no separate embeddings provider.
-  - Chat / scoring / parse-fallback model: `gemini-2.5-flash` (free tier; use
-    `gemini-2.5-flash-lite` for higher rate limits).
+  - Chat / scoring / parse-fallback model: `gemini-flash-latest` (free tier).
+    `gemini-2.5-flash` and `gemini-2.5-flash-lite` are deprecated - both 404
+    "no longer available to new users" as of 2026-08. `gemini-flash-latest`
+    is Google's rolling alias to their current flash model: no version to go
+    stale, but the model behind it can change without notice. Re-verify with
+    a direct curl to `.../v1beta/openai/models` if chat calls start 404ing.
   - Embeddings model: `gemini-embedding-001`.
   - Provider-agnostic on purpose: every model call goes through IChatClient or
     IEmbeddingGenerator, so switching to Claude or OpenAI later is a DI/config
