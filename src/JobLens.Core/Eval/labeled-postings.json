@@ -1,0 +1,205 @@
+{
+  "caveat": "PLACEHOLDER LABELS. isRelevant below was auto-seeded from category membership (Software / QA / Machine Learning-AI = true, everything else = false), copying JobLens:TargetCategories. This is NOT a human judgment of relevance - it grades the scorer against the category filter it is supposed to go beyond, so precision/recall/F1 computed from these labels are meaningless as a real evaluation. Hand-correct isRelevant for each posting (read the description, decide if it actually fits the profile in appsettings.json) before trusting this report.",
+  "postings": [
+    {
+      "messageId": "3EB0D1BDCDB2F145761492",
+      "title": "Software Embedded Developer",
+      "company": "Stratasys",
+      "location": "Rehovot",
+      "category": "Software",
+      "applyUrl": "https://careers.stratasys.com/job/Rehovot-Software-Embedded-Developer/1392085100/",
+      "description": "- Graduating BSc in Computer Engineering or Computer Science by the end of this academic year\n- Good knowledge of C programming language\n- Good knowledge of Object-Oriented programming and one of the following languages: C#, C++, or Java",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB09EC24FAF01E4B4803F",
+      "title": "Junior Full Stack Engineer",
+      "company": "Elbit Systems Israel",
+      "location": "Beer Sheva",
+      "category": "Software",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4375558562",
+      "description": "- B.Sc. degree in Software Engineering, Computer Science, or equivalent\n- Excellent knowledge of Java and Spring Boot\n- Good knowledge of JavaScript, TypeScript, React, and Node.js",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB008BCE8B2DE548E2DD1",
+      "title": "Junior System Implementer",
+      "company": "Konimbo",
+      "location": "Kadima-Zoran",
+      "category": "Software",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4414870304",
+      "description": "- Previous Frontend development experience\n- Knowledge of HTML, CSS, and JavaScript\n- Understanding of information systems, implementation processes, and integrations",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB0834B3B8CBF96151C35",
+      "title": "Navigation Algorithms Engineer",
+      "company": "Rafael Advanced Defense Systems",
+      "location": "Hadera",
+      "category": "Software",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4393501613",
+      "description": "- Degree in Electrical Engineering, Aeronautics, or Mechanical Engineering (Bachelor's, Master's, or PhD)\n- At least 2 years of experience in navigation algorithms, estimation theory, and/or control",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB0D5D31C3D6DC461576F",
+      "title": "Game Developer - Pixijs",
+      "company": "Netoplay",
+      "location": "Haifa",
+      "category": "Software",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4418934400",
+      "description": "- 2+ years of professional experience with PixiJS\n- Strong JavaScript / TypeScript skills\n- Experience developing real-money gaming or casino-style games",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB0BCFD2D32947BB6CCDF",
+      "title": "Salesforce Developer",
+      "company": "Asperii",
+      "location": "Or Yehuda",
+      "category": "Software",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4414896446",
+      "description": "- Minimum 2 years of experience with Force.com developer toolkit (Apex, VisualForce, Lightning Web Components, Force.com IDE, Force.com Migration Tool, Web Services/SOA & Metadata APIs)\n- Minimum 2 years of proficiency with front-end technologies (HTML, CSS, JavaScript)\n- Minimum 2 years of experience and familiarity with Services Oriented Design principles (SOA) and Web Services",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB08148A7386C07B97036",
+      "title": "Backend Developer",
+      "company": "SQLink Group",
+      "location": "Tel Aviv",
+      "category": "Software",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4414896383",
+      "description": "- 2 years of experience in backend development\n- Experience developing with Node.js / JavaScript / TypeScript\n- Experience working with cloud platforms",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB04FF11485283A06FEF1",
+      "title": "Junior Environmental Engineer",
+      "company": "Elbit Systems Israel",
+      "location": "Holon",
+      "category": "QA",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4375559553",
+      "description": "- Bachelor’s degree in Mechanical Engineering / Electronics / Materials / Industrial Engineering and Management / Chemistry\n- Ability to read and write technical English at a good level\n- Willingness to work intensely under heavy workload and short deadlines",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB087F59BC31D2C4312DB",
+      "title": "QA Automation Engineer - Maternity leave cover",
+      "company": "Keshet Media Group",
+      "location": "Tel Aviv District",
+      "category": "QA",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4414866354",
+      "description": "- 1+ years of experience in automation testing or software development\n- 1+ years of experience with JavaScript\n- Experience testing or developing frontend applications (React / Angular / Vue)",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB075AD99571405513EC9",
+      "title": "Digital Health SW QA Engineer",
+      "company": "Eitan Medical",
+      "location": "Netanya/Center",
+      "category": "QA",
+      "applyUrl": "https://www.comeet.com/jobs/eitanmedical/C6.00F/digital-health-sw-qa-engineer/29.B6B",
+      "description": "- QA course or ISTQB certification (or equivalent experience)\n- Minimum 2 years of hands-on experience in software QA, including manual and automation testing\n- Strong understanding of software QA methodologies, tools, and processes",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB0D075D19DAD0279A55E",
+      "title": "QA Engineer",
+      "company": "Jeen",
+      "location": "Tel Aviv District",
+      "category": "QA",
+      "applyUrl": "https://jeen.ai/career/qa-engineer-2/",
+      "description": "- 2 years of experience as Manual QA Engineer\n- Experience testing Cloud & Web applications\n- Experience in REST API testing",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB0D443331C3D6EED5C77",
+      "title": "Junior V&V Engineer- Maternity leave replacement",
+      "company": "Shavit Software",
+      "location": "Petah Tikva",
+      "category": "QA",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4419801563",
+      "description": "- Bachelor’s degree in Biomedical Engineering OR at least 1 year of experience as a Dental Hygienist or Dental Assistant\n- Ability to learn and work with complex systems\n- Excellent analytical skills and strong attention to detail",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB06BE4043F90E631A722",
+      "title": "Data Scientist (Python)",
+      "company": "CodeValue",
+      "location": "Herzliya",
+      "category": "Machine Learning/AI",
+      "applyUrl": "https://www.comeet.com/jobs/codevalue/81.009/data-scientist-python/25.76B",
+      "description": "- 2–3 years of experience as a Data Scientist\n- 2–3 years of hands-on experience developing solutions in Python\n- Experience with Machine Learning and Deep Learning methodologies",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB017007E1949C8D7A844",
+      "title": "Mechanical AI Engineer",
+      "company": "bananaz",
+      "location": "Tel Aviv District",
+      "category": "Machine Learning/AI",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4415220010",
+      "description": "- B.Sc. in Mechanical Engineering (or similar) with at least 1 year of hands-on experience\n- Strong SolidWorks skills\n- Solid understanding of engineering drawings and GD&T",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB0930E5552FC946C2022",
+      "title": "Algorithm Project Manager-Maternity Leave Replacement",
+      "company": "ZOLL Medical Corporation",
+      "location": "Haifa/Caesarea/Herzliya",
+      "category": "Machine Learning/AI",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4408665561",
+      "description": "- Degree in biomedical engineering, bioinformatics, or a related field\n- High level of computer proficiency\n- Ability to perform data and basic statistical analysis using Excel",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB01C26C5B2FB7098930F",
+      "title": "Junior AI Solutions Engineer",
+      "company": "Jeen",
+      "location": "Tel Aviv District",
+      "category": "Machine Learning/AI",
+      "applyUrl": "https://jeen.ai/career/junior-ai-solutions-engineer/",
+      "description": "- Degree in Industrial Engineering or Information Systems Engineering\n- Coding abilities",
+      "isRelevant": true
+    },
+    {
+      "messageId": "3EB0AF231A4FA5888135F2",
+      "title": "Wireless Engineer",
+      "company": "Cambium Applicable Innovation",
+      "location": "Herzliya",
+      "category": "Hardware",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4414851583",
+      "description": "- Bachelor’s degree in Electrical Engineering or a related quantitative field\n- At least 2 years of hands-on industry experience operating advanced RF test and measurement equipment\n- Advanced proficiency in Python for lab automation and results analysis",
+      "isRelevant": false
+    },
+    {
+      "messageId": "3EB05F3F733B0B5F2AED4C",
+      "title": "ASIC Design Verification Engineer - Hod HaSharon",
+      "company": "Qualcomm",
+      "location": "Hod HaSharon",
+      "category": "Hardware",
+      "applyUrl": "https://careers.qualcomm.com/careers/job/446716261073?domain=qualcomm.com&location_distance_km=200&triggerGoButton=true",
+      "description": "- Bachelor's degree in Computer Engineering, Computer Science, Electrical Engineering, or related field, plus 4+ years of relevant engineering experience (Software Engineering, Hardware Engineering, Electrical Engineering, Systems Engineering, or related work experience)\n- Master's degree in Computer Engineering, Computer Science, Electrical Engineering, or related field, plus 3+ years of relevant engineering experience (Software Engineering, Hardware Engineering, Electrical Engineering, Systems Engineering, or related work experience)\n- PhD in Computer Engineering, Computer Science, Electrical Engineering, or related field, plus 2+ years of relevant engineering experience (Software Engineering, Hardware Engineering, Electrical Engineering, Systems Engineering, or related work experience)",
+      "isRelevant": false
+    },
+    {
+      "messageId": "3EB0081D94A895E9EAE006",
+      "title": "Junior R&D Researcher",
+      "company": "FuturaGene Ltdꓸ",
+      "location": "Rehovot/Park Hamada",
+      "category": "Research",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4414868463",
+      "description": "- M.Sc. with industry experience leading research projects, or a recent PhD\n- Strong background in plant biology and molecular techniques",
+      "isRelevant": false
+    },
+    {
+      "messageId": "3EB06C5CC467F1629414C9",
+      "title": "Looking for Research Associates, Postdocs, PhD and MSc students",
+      "company": "Volcani Institute",
+      "location": "Rishon LeZion",
+      "category": "Research",
+      "applyUrl": "https://www.linkedin.com/jobs/view/4415269806",
+      "description": "- Degree in Chemistry and/or Material Science\n- Degree in Biology/Biochemistry and/or Plant Science\n- PhD degree for research associates and postdocs",
+      "isRelevant": false
+    }
+  ]
+}

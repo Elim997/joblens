@@ -1,5 +1,6 @@
 using JobLens.Core.Configuration;
 using JobLens.Core.Embedding;
+using JobLens.Core.Eval;
 using JobLens.Core.Feed;
 using JobLens.Core.Notification;
 using JobLens.Core.Parsing;
@@ -54,6 +55,7 @@ builder.Services.AddSingleton<IProfileEmbeddingProvider, ProfileEmbeddingProvide
 builder.Services.AddSingleton<IRelevanceScorer, GeminiRelevanceScorer>();
 builder.Services.AddSingleton<INotifier, ConsoleNotifier>();
 builder.Services.AddSingleton<PipelineRunner>();
+builder.Services.AddSingleton<EvalHarness>();
 
 builder.Services.AddOpenApi();
 
@@ -140,6 +142,18 @@ app.MapGet("/matches", async (
 {
     var matches = await datastore.GetMatchesAsync(options.Value.MatchThreshold, cancellationToken);
     return Results.Ok(matches);
+});
+
+// Eval harness (Milestone 7): scores the ~20 labeled postings in Eval/labeled-postings.json
+// through the real scorer and reports precision/recall/F1. Caveat comes straight from that
+// file and sits top-level in the response so an auto-seeded, unlabeled run is never mistaken
+// for a real evaluation.
+app.MapPost("/eval", async (EvalHarness harness, CancellationToken cancellationToken) =>
+{
+    var path = Path.Combine(AppContext.BaseDirectory, "Eval", "labeled-postings.json");
+    var labeledSet = await LabeledPostingLoader.LoadAsync(path, cancellationToken);
+    var report = await harness.RunAsync(labeledSet, cancellationToken);
+    return Results.Ok(report);
 });
 
 // Semantic archive search: embeds the query text and ranks stored postings by cosine similarity.

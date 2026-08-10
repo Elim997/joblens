@@ -17,4 +17,10 @@
     <PackageReference Include="Pgvector" Version="0.3.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Copies alongside JobLens.Core.dll and propagates to JobLens.Api/JobLens.Tests
+         output dirs via ProjectReference, so POST /eval can read it at a relative path. -->
+    <None Include="Eval\labeled-postings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
