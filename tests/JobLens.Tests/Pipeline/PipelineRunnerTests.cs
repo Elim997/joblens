@@ -36,6 +36,12 @@ public class PipelineRunnerTests
         // Both postings were scored (matched or not), so both are marked - the
         // low scorer isn't left to be re-scored just because it didn't match.
         Assert.Equal(["id-1", "id-2"], datastore.ScoredMessageIds.OrderBy(id => id));
+
+        // Score and reasoning are persisted for both, not just the matched one -
+        // this is the Milestone 6 follow-up gap: /run's response is a snapshot,
+        // but the datastore must keep the data past that response.
+        Assert.Equal((90, "reason"), datastore.GetPersistedScoreAndReasoning("id-1"));
+        Assert.Equal((30, "reason"), datastore.GetPersistedScoreAndReasoning("id-2"));
     }
 
     [Fact]

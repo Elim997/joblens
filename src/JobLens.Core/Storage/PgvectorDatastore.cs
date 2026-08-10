@@ -30,16 +30,23 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
                     description TEXT NOT NULL,
                     embedding vector({dimension}) NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    scored_at TIMESTAMPTZ NULL
+                    scored_at TIMESTAMPTZ NULL,
+                    score INT NULL,
+                    reasoning TEXT NULL
                 );
                 """;
             await tableCommand.ExecuteNonQueryAsync(cancellationToken);
         }
 
         // Migration path for a table created before Milestone 6: CREATE TABLE above
-        // won't touch an existing table, so add the column separately, idempotently.
+        // won't touch an existing table, so add the columns separately, idempotently.
         await using var alterCommand = connection.CreateCommand();
-        alterCommand.CommandText = "ALTER TABLE job_postings ADD COLUMN IF NOT EXISTS scored_at TIMESTAMPTZ NULL;";
+        alterCommand.CommandText = """
+            ALTER TABLE job_postings
+                ADD COLUMN IF NOT EXISTS scored_at TIMESTAMPTZ NULL,
+                ADD COLUMN IF NOT EXISTS score INT NULL,
+                ADD COLUMN IF NOT EXISTS reasoning TEXT NULL;
+            """;
         await alterCommand.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -154,18 +161,53 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         return results;
     }
 
-    public async Task MarkScoredAsync(IReadOnlyList<string> messageIds, CancellationToken cancellationToken = default)
+    public async Task MarkScoredAsync(IReadOnlyList<ScoredMark> scored, CancellationToken cancellationToken = default)
     {
-        if (messageIds.Count == 0)
+        if (scored.Count == 0)
             return;
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+        // UNNEST zips the three arrays into rows, so each message_id gets its own
+        // score/reasoning in a single round trip instead of one UPDATE per posting.
         command.CommandText = """
-            UPDATE job_postings SET scored_at = now()
-            WHERE message_id = ANY(@ids);
+            UPDATE job_postings AS jp
+            SET scored_at = now(), score = data.score, reasoning = data.reasoning
+            FROM UNNEST(@ids, @scores, @reasonings) AS data(message_id, score, reasoning)
+            WHERE jp.message_id = data.message_id;
             """;
-        command.Parameters.AddWithValue("ids", messageIds.ToArray());
+        command.Parameters.AddWithValue("ids", scored.Select(s => s.MessageId).ToArray());
+        command.Parameters.AddWithValue("scores", scored.Select(s => s.Score).ToArray());
+        command.Parameters.AddWithValue("reasonings", scored.Select(s => s.Reasoning).ToArray());
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<StoredMatch>> GetMatchesAsync(int matchThreshold, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT title, company, location, category, apply_url, description, score, reasoning
+            FROM job_postings
+            WHERE score >= @matchThreshold
+            ORDER BY score DESC;
+            """;
+        command.Parameters.AddWithValue("matchThreshold", matchThreshold);
+
+        var results = new List<StoredMatch>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var posting = new JobPosting(
+                Title: reader.GetString(0),
+                Company: reader.GetString(1),
+                Location: reader.GetString(2),
+                Category: reader.GetString(3),
+                ApplyUrl: reader.GetString(4),
+                Description: reader.GetString(5));
+            results.Add(new StoredMatch(posting, reader.GetInt32(6), reader.GetString(7)));
+        }
+
+        return results;
     }
 }

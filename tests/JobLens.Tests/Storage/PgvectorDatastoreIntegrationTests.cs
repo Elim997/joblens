@@ -121,6 +121,51 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MarkScoredAsync_PersistsScoreAndReasoning_AndGetMatchesAsync_OrdersByScoreDescending()
+    {
+        var highId = $"test-milestone6-high-{Guid.NewGuid():N}";
+        var lowId = $"test-milestone6-low-{Guid.NewGuid():N}";
+        var belowThresholdId = $"test-milestone6-below-{Guid.NewGuid():N}";
+        _testMessageIds.Add(highId);
+        _testMessageIds.Add(lowId);
+        _testMessageIds.Add(belowThresholdId);
+
+        var highPosting = new JobPosting(
+            "High Match", "Acme", "Tel Aviv", "Software", "https://example.com/high", "- test");
+        var lowPosting = new JobPosting(
+            "Low Match", "Acme", "Tel Aviv", "Software", "https://example.com/low", "- test");
+        var belowPosting = new JobPosting(
+            "Below Threshold", "Acme", "Tel Aviv", "Software", "https://example.com/below", "- test");
+
+        var embedding = await _embedder.EmbedAsync("milestone 6 follow-up match test");
+        await _datastore.EnsureSchemaAsync(embedding.Length);
+        await _datastore.UpsertAsync(highId, highPosting, embedding);
+        await _datastore.UpsertAsync(lowId, lowPosting, embedding);
+        await _datastore.UpsertAsync(belowThresholdId, belowPosting, embedding);
+
+        await _datastore.MarkScoredAsync(
+        [
+            new ScoredMark(highId, 95, "Great fit"),
+            new ScoredMark(lowId, 75, "Decent fit"),
+            new ScoredMark(belowThresholdId, 40, "Not a fit"),
+        ]);
+
+        var matches = await _datastore.GetMatchesAsync(matchThreshold: 70);
+
+        // The table also holds real ingested/other-test postings, so compare relative
+        // order and presence/absence of these three ids rather than the full result set.
+        var matchIds = matches.Select(m => m.Posting.ApplyUrl).ToList();
+        Assert.Contains(highPosting.ApplyUrl, matchIds);
+        Assert.Contains(lowPosting.ApplyUrl, matchIds);
+        Assert.DoesNotContain(belowPosting.ApplyUrl, matchIds);
+        Assert.True(matchIds.IndexOf(highPosting.ApplyUrl) < matchIds.IndexOf(lowPosting.ApplyUrl));
+
+        var highMatch = matches.Single(m => m.Posting.ApplyUrl == highPosting.ApplyUrl);
+        Assert.Equal(95, highMatch.Score);
+        Assert.Equal("Great fit", highMatch.Reasoning);
+    }
+
+    [Fact]
     public async Task GetExistingMessageIdsAsync_ReflectsStoredRows()
     {
         var id = $"test-milestone4-dedupe-{Guid.NewGuid():N}";

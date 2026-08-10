@@ -42,8 +42,11 @@ public class PipelineRunner(
 
         // Mark everything the model actually scored (matched or not) - not the whole
         // unscored set, so anything beyond this run's shortlist stays available for
-        // the next run instead of silently never being considered.
-        await datastore.MarkScoredAsync(scored.Select(s => s.Id).ToList(), cancellationToken);
+        // the next run instead of silently never being considered. Persist score and
+        // reasoning too, so a match survives past this response for GET /matches.
+        await datastore.MarkScoredAsync(
+            scored.Select(s => new ScoredMark(s.Id, s.Score, s.Reasoning)).ToList(),
+            cancellationToken);
 
         return new RunSummary(scored.Count, matches.Count, matches.Count);
     }

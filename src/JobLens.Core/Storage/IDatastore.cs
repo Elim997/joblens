@@ -6,12 +6,16 @@ public record SimilarPosting(JobPosting Posting, double Similarity);
 
 public record UnscoredPosting(string MessageId, JobPosting Posting, float[] Embedding);
 
+public record ScoredMark(string MessageId, int Score, string Reasoning);
+
+public record StoredMatch(JobPosting Posting, int Score, string Reasoning);
+
 public interface IDatastore
 {
     /// <summary>
     /// Creates the pgvector extension/table if missing, sized to the given embedding
-    /// dimension, and adds the scored_at column if missing. Idempotent - safe to call
-    /// before every write or query.
+    /// dimension, and adds the scored_at/score/reasoning columns if missing. Idempotent -
+    /// safe to call before every write or query.
     /// </summary>
     Task EnsureSchemaAsync(int dimension, CancellationToken cancellationToken = default);
 
@@ -33,8 +37,15 @@ public interface IDatastore
     Task<IReadOnlyList<UnscoredPosting>> GetUnscoredPostingsAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sets scored_at = now() for the given ids so they are never re-scored or
-    /// re-notified by a later run, regardless of whether they matched.
+    /// Sets scored_at = now() and stores score/reasoning for each entry, so a posting is
+    /// never re-scored or re-notified by a later run and GetMatchesAsync can serve it
+    /// without a live model call. Called for every scored posting, matched or not.
     /// </summary>
-    Task MarkScoredAsync(IReadOnlyList<string> messageIds, CancellationToken cancellationToken = default);
+    Task MarkScoredAsync(IReadOnlyList<ScoredMark> scored, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Stored postings with score >= matchThreshold, ordered by score descending - what
+    /// GET /matches serves, so matches from a past /run are visible without a re-run.
+    /// </summary>
+    Task<IReadOnlyList<StoredMatch>> GetMatchesAsync(int matchThreshold, CancellationToken cancellationToken = default);
 }

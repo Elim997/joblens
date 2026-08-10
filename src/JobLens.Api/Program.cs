@@ -131,6 +131,17 @@ app.MapPost("/run", async (PipelineRunner runner, CancellationToken cancellation
     return Results.Ok(summary);
 });
 
+// Stored matches from past /run passes: postings with score >= MatchThreshold, ordered
+// highest first. Reads what MarkScoredAsync already persisted - no model call, no re-run.
+app.MapGet("/matches", async (
+    IDatastore datastore,
+    IOptions<JobLensOptions> options,
+    CancellationToken cancellationToken) =>
+{
+    var matches = await datastore.GetMatchesAsync(options.Value.MatchThreshold, cancellationToken);
+    return Results.Ok(matches);
+});
+
 // Semantic archive search: embeds the query text and ranks stored postings by cosine similarity.
 app.MapGet("/query", async (
     string text,
