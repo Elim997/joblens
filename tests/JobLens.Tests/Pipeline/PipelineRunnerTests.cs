@@ -11,6 +11,9 @@ public class PipelineRunnerTests
     private static JobPosting MakePosting(string title) =>
         new(title, "Acme", "Tel Aviv", "Software", $"https://example.com/{title}", "- test requirement");
 
+    private static JobPosting MakePosting(string title, string company, string applyUrl) =>
+        new(title, company, "Tel Aviv", "Software", applyUrl, "- test requirement");
+
     private static PipelineRunner CreateRunner(
         FakeDatastore datastore, FakeRelevanceScorer scorer, FakeNotifier notifier, int matchThreshold = 70) =>
         new(datastore, scorer, new FakeProfileEmbeddingProvider([1f, 0f, 0f]), notifier,
@@ -95,6 +98,32 @@ public class PipelineRunnerTests
         // Still unscored, so a later run would pick it up again.
         var stillUnscored = await datastore.GetUnscoredPostingsAsync();
         Assert.Single(stillUnscored);
+    }
+
+    [Fact]
+    public async Task RunAsync_TwoMatchesShareApplyUrl_NotifiesOnceButMarksBothScored()
+    {
+        // The same job reposted under a different message_id, with a slightly different
+        // company-name spelling - both parse as separate postings, but they're the same job.
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Backend Engineer", "Acme", "https://example.com/job/123"), [1f, 0f, 0f]);
+        datastore.Seed("id-2", MakePosting("Backend Engineer", "Acme Inc.", "https://example.com/job/123"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason")).ToList());
+        var notifier = new FakeNotifier();
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
+
+        var summary = await runner.RunAsync();
+
+        // Both count as matched (raw threshold pass), but only one notification goes out.
+        Assert.Equal(new RunSummary(Scored: 2, Matched: 2, Notified: 1), summary);
+        Assert.Single(notifier.Calls);
+        Assert.Single(notifier.Calls[0]);
+
+        // Dedup only affects what gets notified - both postings are still marked scored,
+        // so neither is left to be rescored or renotified by a later run.
+        Assert.Equal(["id-1", "id-2"], datastore.ScoredMessageIds.OrderBy(id => id));
     }
 
     [Fact]

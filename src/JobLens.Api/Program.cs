@@ -21,31 +21,37 @@ var config = builder.Configuration;
 // TargetCategories/Profile/ScoringTopK from appsettings. Injected later as IOptions<JobLensOptions>.
 builder.Services.Configure<JobLensOptions>(config.GetSection("JobLens"));
 
-if (string.IsNullOrWhiteSpace(config["JobLens:MessagesDbPath"]))
-    throw new InvalidOperationException("Missing JobLens:MessagesDbPath");
-if (config.GetSection("JobLens:GroupChatJids").Get<string[]>() is not { Length: > 0 })
-    throw new InvalidOperationException("Missing JobLens:GroupChatJids (must be a non-empty array)");
-
-// Postgres + pgvector data source, registered in DI.
-var pgConn = config["Postgres:ConnectionString"]
-    ?? throw new InvalidOperationException("Missing Postgres:ConnectionString");
-var dataSourceBuilder = new NpgsqlDataSourceBuilder(pgConn);
-dataSourceBuilder.UseVector();
-builder.Services.AddSingleton(dataSourceBuilder.Build());
+// Postgres + pgvector data source, and the Gemini clients, are resolved lazily (factory
+// delegates read IConfiguration at first resolution, not here). This isn't just style:
+// a factory only runs on first actual use, which happens after builder.Build() - so
+// Program.ValidateRequiredConfig (called after Build(), see below) can catch missing
+// config with a clean error before these factories ever run, and so an integration test
+// hitting only /health never needs a real Postgres/Gemini config to begin with.
+builder.Services.AddSingleton(sp =>
+{
+    var pgConn = sp.GetRequiredService<IConfiguration>()["Postgres:ConnectionString"]
+        ?? throw new InvalidOperationException("Missing Postgres:ConnectionString");
+    var dataSourceBuilder = new NpgsqlDataSourceBuilder(pgConn);
+    dataSourceBuilder.UseVector();
+    return dataSourceBuilder.Build();
+});
 
 // Gemini via its OpenAI-compatible endpoint, exposed as the M.E.AI abstractions.
-var geminiKey = config["Gemini:ApiKey"]
-    ?? throw new InvalidOperationException("Missing Gemini:ApiKey");
-var gemini = new OpenAIClient(
-    new ApiKeyCredential(geminiKey),
-    new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") });
+builder.Services.AddSingleton(sp =>
+{
+    var geminiKey = sp.GetRequiredService<IConfiguration>()["Gemini:ApiKey"]
+        ?? throw new InvalidOperationException("Missing Gemini:ApiKey");
+    return new OpenAIClient(
+        new ApiKeyCredential(geminiKey),
+        new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") });
+});
 // gemini-2.5-flash and gemini-2.5-flash-lite are deprecated (404 "no longer
 // available to new users" as of this key). gemini-flash-latest is Google's rolling
 // alias to their current flash model - confirmed working live; see CLAUDE.md.
-builder.Services.AddSingleton<IChatClient>(
-    gemini.GetChatClient("gemini-flash-latest").AsIChatClient());
-builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
-    gemini.GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator());
+builder.Services.AddSingleton<IChatClient>(sp =>
+    sp.GetRequiredService<OpenAIClient>().GetChatClient("gemini-flash-latest").AsIChatClient());
+builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
+    sp.GetRequiredService<OpenAIClient>().GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator());
 
 builder.Services.AddSingleton<IJobFeedSource, SqliteJobFeedSource>();
 builder.Services.AddSingleton<IPostingParser, WhatsAppPostingParser>();
@@ -60,6 +66,12 @@ builder.Services.AddSingleton<EvalHarness>();
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
+
+// Fail fast on missing required config. Runs against app.Configuration - the fully
+// built configuration - rather than the pre-Build builder.Configuration, so a test
+// host's config overrides (only merged in during Build()) are visible here. See
+// Program.ValidateRequiredConfig for the hermetic unit tests that prove this directly.
+Program.ValidateRequiredConfig(app.Configuration);
 
 if (app.Environment.IsDevelopment())
 {
@@ -172,4 +184,24 @@ app.MapGet("/query", async (
 
 app.Run();
 
-public partial class Program;
+public partial class Program
+{
+    /// <summary>
+    /// Guards against a missing MessagesDbPath, GroupChatJids, Postgres connection
+    /// string, or Gemini key with a clear error instead of a cryptic failure the first
+    /// time something tries to use them. Pure function of IConfiguration so it's
+    /// directly unit-testable with in-memory config, independent of real secrets - see
+    /// ProgramValidationTests.
+    /// </summary>
+    public static void ValidateRequiredConfig(IConfiguration config)
+    {
+        if (string.IsNullOrWhiteSpace(config["JobLens:MessagesDbPath"]))
+            throw new InvalidOperationException("Missing JobLens:MessagesDbPath");
+        if (config.GetSection("JobLens:GroupChatJids").Get<string[]>() is not { Length: > 0 })
+            throw new InvalidOperationException("Missing JobLens:GroupChatJids (must be a non-empty array)");
+        if (string.IsNullOrWhiteSpace(config["Postgres:ConnectionString"]))
+            throw new InvalidOperationException("Missing Postgres:ConnectionString");
+        if (string.IsNullOrWhiteSpace(config["Gemini:ApiKey"]))
+            throw new InvalidOperationException("Missing Gemini:ApiKey");
+    }
+}

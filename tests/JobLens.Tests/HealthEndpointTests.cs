@@ -36,4 +36,29 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("\"status\":\"ok\"", body);
     }
+
+    // Proves this whole test class is genuinely hermetic, not passing by accident
+    // because this machine's real user-secrets happen to satisfy validation: overriding
+    // one required setting to blank must make the host fail to start, using only this
+    // test's in-memory config - no real secrets involved either way.
+    [Fact]
+    public async Task Health_BlankRequiredSetting_HostFailsToStart()
+    {
+        var brokenFactory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureAppConfiguration((_, config) =>
+            {
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["JobLens:MessagesDbPath"] = "",
+                });
+            });
+        });
+
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+        {
+            var client = brokenFactory.CreateClient();
+            await client.GetAsync("/health");
+        });
+    }
 }

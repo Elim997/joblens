@@ -208,6 +208,10 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
             results.Add(new StoredMatch(posting, reader.GetInt32(6), reader.GetString(7)));
         }
 
-        return results;
+        // The feed sometimes reposts the same job under a different message_id; collapse
+        // here rather than in SQL so the query stays simple and dedup logic is shared
+        // with PipelineRunner's notify path. Rows are already ordered by score DESC, so
+        // the highest-scored copy of a duplicate is the one that survives.
+        return NearDuplicateCollapser.Collapse(results, m => m.Posting);
     }
 }

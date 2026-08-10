@@ -166,6 +166,40 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task GetMatchesAsync_TwoPostingsShareApplyUrl_CollapsesToTheHigherScoredOne()
+    {
+        // Same job, reposted under a different message_id with a slightly different
+        // company-name spelling - two rows in storage (message_id is still the primary
+        // key, unchanged), but GetMatchesAsync should surface it as one match.
+        var applyUrl = $"https://example.com/dup-{Guid.NewGuid():N}";
+        var higherId = $"test-milestone-cleanup-dup-high-{Guid.NewGuid():N}";
+        var lowerId = $"test-milestone-cleanup-dup-low-{Guid.NewGuid():N}";
+        _testMessageIds.Add(higherId);
+        _testMessageIds.Add(lowerId);
+
+        var higherPosting = new JobPosting("Backend Engineer", "Acme", "Tel Aviv", "Software", applyUrl, "- test");
+        var lowerPosting = new JobPosting("Backend Engineer", "Acme Inc.", "Tel Aviv", "Software", applyUrl, "- test");
+
+        var embedding = await _embedder.EmbedAsync("milestone cleanup near-duplicate collapse test");
+        await _datastore.EnsureSchemaAsync(embedding.Length);
+        await _datastore.UpsertAsync(higherId, higherPosting, embedding);
+        await _datastore.UpsertAsync(lowerId, lowerPosting, embedding);
+
+        await _datastore.MarkScoredAsync(
+        [
+            new ScoredMark(higherId, 95, "Great fit"),
+            new ScoredMark(lowerId, 80, "Also a fit, but a repost"),
+        ]);
+
+        var matches = await _datastore.GetMatchesAsync(matchThreshold: 70);
+
+        var duplicateMatches = matches.Where(m => m.Posting.ApplyUrl == applyUrl).ToList();
+        var onlyMatch = Assert.Single(duplicateMatches);
+        Assert.Equal(95, onlyMatch.Score);
+        Assert.Equal("Acme", onlyMatch.Posting.Company);
+    }
+
+    [Fact]
     public async Task GetExistingMessageIdsAsync_ReflectsStoredRows()
     {
         var id = $"test-milestone4-dedupe-{Guid.NewGuid():N}";

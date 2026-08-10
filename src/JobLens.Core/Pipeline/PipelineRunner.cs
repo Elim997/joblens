@@ -1,6 +1,7 @@
 using JobLens.Core.Configuration;
 using JobLens.Core.Embedding;
 using JobLens.Core.Notification;
+using JobLens.Core.Parsing;
 using JobLens.Core.Scoring;
 using JobLens.Core.Storage;
 using Microsoft.Extensions.Options;
@@ -37,8 +38,14 @@ public class PipelineRunner(
             return new RunSummary(0, 0, 0);
 
         var matches = scored.Where(s => s.Score >= options.Value.MatchThreshold).ToList();
-        if (matches.Count > 0)
-            await notifier.NotifyAsync(matches, cancellationToken);
+
+        // The same job sometimes gets posted more than once (repost, tiny company-name
+        // spelling difference); collapse before notifying so a duplicate never sends a
+        // second notification. Every scored posting is still marked below regardless -
+        // dedup only affects what gets sent, not what counts as scored.
+        var toNotify = NearDuplicateCollapser.Collapse(matches, m => m.Posting);
+        if (toNotify.Count > 0)
+            await notifier.NotifyAsync(toNotify, cancellationToken);
 
         // Mark everything the model actually scored (matched or not) - not the whole
         // unscored set, so anything beyond this run's shortlist stays available for
@@ -48,6 +55,6 @@ public class PipelineRunner(
             scored.Select(s => new ScoredMark(s.Id, s.Score, s.Reasoning)).ToList(),
             cancellationToken);
 
-        return new RunSummary(scored.Count, matches.Count, matches.Count);
+        return new RunSummary(scored.Count, matches.Count, toNotify.Count);
     }
 }
