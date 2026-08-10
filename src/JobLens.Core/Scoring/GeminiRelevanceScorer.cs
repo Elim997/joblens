@@ -90,7 +90,17 @@ public class GeminiRelevanceScorer(
         const string systemPrompt = """
             You score job postings for fit against a candidate profile. For each
             posting, return a score from 0 to 100 (0 = no fit, 100 = perfect fit) and a
-            1-2 sentence reasoning. Respond with ONLY a JSON array, no markdown fences,
+            1-2 sentence reasoning.
+
+            Treat stated experience requirements as soft signals, not hard filters. A
+            junior candidate open to stretch roles may still be a strong match for a
+            posting asking for 1-3 years if the tech stack and domain fit. Do not
+            heavily penalize a good stack/domain match solely because the posting lists
+            a couple years of experience. Reserve low scores for genuine mismatches:
+            wrong domain (hardware, biomedical, research), wrong discipline, or
+            senior/lead roles.
+
+            Respond with ONLY a JSON array, no markdown fences,
             no extra text: [{"index": 0, "score": 85, "reasoning": "..."}, ...]
             Exactly one entry per posting, using the given index.
             """;
