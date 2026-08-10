@@ -16,22 +16,31 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
             await extensionCommand.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var tableCommand = connection.CreateCommand();
-        // dimension comes from a live embedding call, not a hardcoded literal - see GeminiEmbedder.
-        tableCommand.CommandText = $"""
-            CREATE TABLE IF NOT EXISTS job_postings (
-                message_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                company TEXT NOT NULL,
-                location TEXT NOT NULL,
-                category TEXT NOT NULL,
-                apply_url TEXT NOT NULL,
-                description TEXT NOT NULL,
-                embedding vector({dimension}) NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
-            """;
-        await tableCommand.ExecuteNonQueryAsync(cancellationToken);
+        await using (var tableCommand = connection.CreateCommand())
+        {
+            // dimension comes from a live embedding call, not a hardcoded literal - see GeminiEmbedder.
+            tableCommand.CommandText = $"""
+                CREATE TABLE IF NOT EXISTS job_postings (
+                    message_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    company TEXT NOT NULL,
+                    location TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    apply_url TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    embedding vector({dimension}) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    scored_at TIMESTAMPTZ NULL
+                );
+                """;
+            await tableCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Migration path for a table created before Milestone 6: CREATE TABLE above
+        // won't touch an existing table, so add the column separately, idempotently.
+        await using var alterCommand = connection.CreateCommand();
+        alterCommand.CommandText = "ALTER TABLE job_postings ADD COLUMN IF NOT EXISTS scored_at TIMESTAMPTZ NULL;";
+        await alterCommand.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task<IReadOnlySet<string>> GetExistingMessageIdsAsync(CancellationToken cancellationToken = default)
@@ -115,5 +124,48 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         }
 
         return results;
+    }
+
+    public async Task<IReadOnlyList<UnscoredPosting>> GetUnscoredPostingsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT message_id, title, company, location, category, apply_url, description, embedding
+            FROM job_postings
+            WHERE scored_at IS NULL;
+            """;
+
+        var results = new List<UnscoredPosting>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var posting = new JobPosting(
+                Title: reader.GetString(1),
+                Company: reader.GetString(2),
+                Location: reader.GetString(3),
+                Category: reader.GetString(4),
+                ApplyUrl: reader.GetString(5),
+                Description: reader.GetString(6));
+            var embedding = reader.GetFieldValue<Vector>(7).ToArray();
+            results.Add(new UnscoredPosting(reader.GetString(0), posting, embedding));
+        }
+
+        return results;
+    }
+
+    public async Task MarkScoredAsync(IReadOnlyList<string> messageIds, CancellationToken cancellationToken = default)
+    {
+        if (messageIds.Count == 0)
+            return;
+
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE job_postings SET scored_at = now()
+            WHERE message_id = ANY(@ids);
+            """;
+        command.Parameters.AddWithValue("ids", messageIds.ToArray());
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

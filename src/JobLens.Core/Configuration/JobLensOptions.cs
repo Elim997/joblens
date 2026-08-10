@@ -6,5 +6,6 @@ public class JobLensOptions
     public string[] GroupChatJids { get; set; } = [];
     public string[] TargetCategories { get; set; } = [];
     public string Profile { get; set; } = "";
-    public int ScoringTopK { get; set; } = 10;
+    public int ScoringTopK { get; set; } = 40;
+    public int MatchThreshold { get; set; } = 70;
 }

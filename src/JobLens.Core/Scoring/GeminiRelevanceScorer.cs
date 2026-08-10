@@ -15,7 +15,7 @@ public class GeminiRelevanceScorer(
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public async Task<IReadOnlyList<ScoredPosting>> ScoreAsync(
-        IReadOnlyList<(JobPosting Posting, float[] Embedding)> candidates,
+        IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)> candidates,
         float[] profileEmbedding,
         CancellationToken cancellationToken = default)
     {
@@ -25,10 +25,10 @@ public class GeminiRelevanceScorer(
         var shortlist = candidates
             .OrderByDescending(c => VectorMath.CosineSimilarity(c.Embedding, profileEmbedding))
             .Take(options.Value.ScoringTopK)
-            .Select(c => c.Posting)
+            .Select(c => (c.Id, c.Posting))
             .ToList();
 
-        var messages = BuildPrompt(options.Value.Profile, shortlist);
+        var messages = BuildPrompt(options.Value.Profile, shortlist.Select(s => s.Posting).ToList());
         var chatOptions = new ChatOptions { ResponseFormat = ChatResponseFormat.Json };
 
         // Structural failure (invalid JSON): retry the identical call once, then give
@@ -79,7 +79,7 @@ public class GeminiRelevanceScorer(
                 continue;
             }
 
-            results.Add(new ScoredPosting(shortlist[item.Index], item.Score, item.Reasoning));
+            results.Add(new ScoredPosting(shortlist[item.Index].Id, shortlist[item.Index].Posting, item.Score, item.Reasoning));
         }
 
         return results.OrderByDescending(r => r.Score).ToList();

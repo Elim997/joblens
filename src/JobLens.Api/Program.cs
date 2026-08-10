@@ -1,7 +1,9 @@
 using JobLens.Core.Configuration;
 using JobLens.Core.Embedding;
 using JobLens.Core.Feed;
+using JobLens.Core.Notification;
 using JobLens.Core.Parsing;
+using JobLens.Core.Pipeline;
 using JobLens.Core.Scoring;
 using JobLens.Core.Storage;
 using Microsoft.Extensions.AI;
@@ -50,6 +52,8 @@ builder.Services.AddSingleton<IEmbedder, GeminiEmbedder>();
 builder.Services.AddSingleton<IDatastore, PgvectorDatastore>();
 builder.Services.AddSingleton<IProfileEmbeddingProvider, ProfileEmbeddingProvider>();
 builder.Services.AddSingleton<IRelevanceScorer, GeminiRelevanceScorer>();
+builder.Services.AddSingleton<INotifier, ConsoleNotifier>();
+builder.Services.AddSingleton<PipelineRunner>();
 
 builder.Services.AddOpenApi();
 
@@ -102,7 +106,7 @@ app.MapPost("/ingest", async (
             await datastore.UpsertAsync(toEmbed[i].Message.Id, toEmbed[i].Posting!, embeddings[i], cancellationToken);
 
         var profileEmbedding = await profileEmbeddingProvider.GetProfileEmbeddingAsync(cancellationToken);
-        var scoringCandidates = toEmbed.Select((x, i) => (x.Posting!, embeddings[i])).ToList();
+        var scoringCandidates = toEmbed.Select((x, i) => (x.Message.Id, x.Posting!, embeddings[i])).ToList();
         matches = await scorer.ScoreAsync(scoringCandidates, profileEmbedding, cancellationToken);
     }
 
@@ -115,6 +119,16 @@ app.MapPost("/ingest", async (
         embedded = toEmbed.Count,
         matches,
     });
+});
+
+// The real "score my whole archive" loop: ranks every unscored posting in pgvector
+// against the profile (not just a fresh /ingest batch), scores the top ScoringTopK,
+// notifies matches at/above MatchThreshold, and marks exactly what got scored so a
+// later run never re-scores or re-notifies it.
+app.MapPost("/run", async (PipelineRunner runner, CancellationToken cancellationToken) =>
+{
+    var summary = await runner.RunAsync(cancellationToken);
+    return Results.Ok(summary);
 });
 
 // Semantic archive search: embeds the query text and ranks stored postings by cosine similarity.

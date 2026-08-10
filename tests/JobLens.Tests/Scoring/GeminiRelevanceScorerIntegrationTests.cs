@@ -47,10 +47,10 @@ public class GeminiRelevanceScorerIntegrationTests
             "Senior Mechanical Design Engineer", "Beta", "Haifa", "Mechanical Engineering",
             "https://example.com/mech", "- SolidWorks, 10+ years experience with HVAC systems");
 
-        var candidates = new List<(JobPosting, float[])>
+        var candidates = new List<(string, JobPosting, float[])>
         {
-            (backendPosting, [1f, 0f, 0f]),
-            (unrelatedPosting, [0f, 1f, 0f]),
+            ("backend-id", backendPosting, [1f, 0f, 0f]),
+            ("unrelated-id", unrelatedPosting, [0f, 1f, 0f]),
         };
 
         var results = await scorer.ScoreAsync(candidates, [1f, 0f, 0f]);

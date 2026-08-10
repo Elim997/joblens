@@ -11,6 +11,9 @@ public class GeminiRelevanceScorerTests
     private static JobPosting MakePosting(string title) =>
         new(title, "Acme", "Tel Aviv", "Software", $"https://example.com/{title}", "- test requirement");
 
+    private static (string Id, JobPosting Posting, float[] Embedding) MakeCandidate(string title, float[] embedding) =>
+        ($"id-{title}", MakePosting(title), embedding);
+
     private static GeminiRelevanceScorer CreateScorer(FakeChatClient chatClient, int scoringTopK = 10) =>
         new(chatClient,
             Options.Create(new JobLensOptions { Profile = "test profile", ScoringTopK = scoringTopK }),
@@ -27,15 +30,16 @@ public class GeminiRelevanceScorerTests
             """);
         var scorer = CreateScorer(chatClient);
 
-        var candidates = new List<(JobPosting, float[])>
+        var candidates = new List<(string, JobPosting, float[])>
         {
-            (MakePosting("Strong Match"), [0f, 1f, 0f]),
-            (MakePosting("Weak Match"), [1f, 0f, 0f]),
+            MakeCandidate("Strong Match", [0f, 1f, 0f]),
+            MakeCandidate("Weak Match", [1f, 0f, 0f]),
         };
 
         var results = await scorer.ScoreAsync(candidates, [0f, 1f, 0f]);
 
         Assert.Equal(2, results.Count);
+        Assert.Equal("id-Strong Match", results[0].Id);
         Assert.Equal("Strong Match", results[0].Posting.Title);
         Assert.Equal(90, results[0].Score);
         Assert.Equal("Weak Match", results[1].Posting.Title);
@@ -51,11 +55,11 @@ public class GeminiRelevanceScorerTests
         var scorer = CreateScorer(chatClient, scoringTopK: 2);
 
         var profileEmbedding = new float[] { 1f, 0f, 0f };
-        var candidates = new List<(JobPosting, float[])>
+        var candidates = new List<(string, JobPosting, float[])>
         {
-            (MakePosting("Best Match"), [1f, 0f, 0f]),       // cosine 1.0
-            (MakePosting("Second Best"), [0.9f, 0.1f, 0f]),  // cosine ~0.99
-            (MakePosting("Worst Match"), [0f, 1f, 0f]),      // cosine 0.0
+            MakeCandidate("Best Match", [1f, 0f, 0f]),       // cosine 1.0
+            MakeCandidate("Second Best", [0.9f, 0.1f, 0f]),  // cosine ~0.99
+            MakeCandidate("Worst Match", [0f, 1f, 0f]),      // cosine 0.0
         };
 
         await scorer.ScoreAsync(candidates, profileEmbedding);
@@ -75,7 +79,7 @@ public class GeminiRelevanceScorerTests
             """[{"index":0,"score":75,"reasoning":"Fits the backend/QA profile well."}]""");
         var scorer = CreateScorer(chatClient);
 
-        var candidates = new List<(JobPosting, float[])> { (MakePosting("Only Candidate"), [1f, 0f, 0f]) };
+        var candidates = new List<(string, JobPosting, float[])> { MakeCandidate("Only Candidate", [1f, 0f, 0f]) };
 
         var results = await scorer.ScoreAsync(candidates, [1f, 0f, 0f]);
 
@@ -90,7 +94,7 @@ public class GeminiRelevanceScorerTests
         var chatClient = new FakeChatClient("not json", "still not json");
         var scorer = CreateScorer(chatClient);
 
-        var candidates = new List<(JobPosting, float[])> { (MakePosting("Only Candidate"), [1f, 0f, 0f]) };
+        var candidates = new List<(string, JobPosting, float[])> { MakeCandidate("Only Candidate", [1f, 0f, 0f]) };
 
         var results = await scorer.ScoreAsync(candidates, [1f, 0f, 0f]);
 
@@ -108,10 +112,10 @@ public class GeminiRelevanceScorerTests
             """);
         var scorer = CreateScorer(chatClient);
 
-        var candidates = new List<(JobPosting, float[])>
+        var candidates = new List<(string, JobPosting, float[])>
         {
-            (MakePosting("First Item"), [0f, 1f, 0f]),
-            (MakePosting("Second Item"), [1f, 0f, 0f]),
+            MakeCandidate("First Item", [0f, 1f, 0f]),
+            MakeCandidate("Second Item", [1f, 0f, 0f]),
         };
 
         var results = await scorer.ScoreAsync(candidates, [0f, 1f, 0f]);
