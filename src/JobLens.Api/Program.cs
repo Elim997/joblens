@@ -80,6 +80,7 @@ builder.Services.AddSingleton<ITokenCache>(sp => new EncryptedFileTokenCache(
 #pragma warning restore CA1416
 builder.Services.AddSingleton<IResumeClient, RealResumeClient>();
 builder.Services.AddSingleton<IResumeTailor, GeminiResumeTailor>();
+builder.Services.AddSingleton<ResumeTailoringRunner>();
 
 builder.Services.AddOpenApi();
 
@@ -198,6 +199,22 @@ app.MapGet("/query", async (
     await datastore.EnsureSchemaAsync(queryEmbedding.Length, cancellationToken);
     var results = await datastore.QuerySimilarAsync(queryEmbedding, topK ?? 5, cancellationToken);
     return Results.Ok(results);
+});
+
+// Phase 3: tailor a resume for one stored posting. commit defaults to false (preview only -
+// returns the chosen base, rationale, and rewritten content, writes nothing) so an accidental
+// call never overwrites the "for edit" slot; commit=true is the only path in JobLens that
+// writes to Rezi, and only ever to that one configured slot (see ResumeTailoringRunner).
+app.MapPost("/tailor", async (
+    string messageId,
+    bool commit,
+    ResumeTailoringRunner runner,
+    CancellationToken cancellationToken) =>
+{
+    var result = await runner.RunAsync(messageId, commit, cancellationToken);
+    return result is null
+        ? Results.NotFound(new { error = $"No stored posting found for messageId '{messageId}'." })
+        : Results.Ok(result);
 });
 
 app.Run();

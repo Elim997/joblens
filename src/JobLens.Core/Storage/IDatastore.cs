@@ -28,6 +28,13 @@ public interface IDatastore
 
     Task UpsertAsync(string messageId, JobPosting posting, float[] embedding, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// A single stored posting by its message id, for the on-demand /tailor endpoint. Returns
+    /// null if never ingested (the caller turns that into a 404) - independent of whether it
+    /// has been scored yet.
+    /// </summary>
+    Task<JobPosting?> GetPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<SimilarPosting>> QuerySimilarAsync(float[] queryEmbedding, int topK, CancellationToken cancellationToken = default);
 
     /// <summary>

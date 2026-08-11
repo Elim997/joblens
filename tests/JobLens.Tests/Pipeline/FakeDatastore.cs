@@ -33,6 +33,9 @@ public class FakeDatastore : IDatastore
     public Task UpsertAsync(string messageId, JobPosting posting, float[] embedding, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("Not used by PipelineRunner.");
 
+    public Task<JobPosting?> GetPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_rows.FirstOrDefault(r => r.MessageId == messageId)?.Posting);
+
     public Task<IReadOnlyList<SimilarPosting>> QuerySimilarAsync(float[] queryEmbedding, int topK, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("Not used by PipelineRunner.");
 

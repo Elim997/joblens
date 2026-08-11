@@ -100,6 +100,30 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<JobPosting?> GetPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT title, company, location, category, apply_url, description
+            FROM job_postings
+            WHERE message_id = @messageId;
+            """;
+        command.Parameters.AddWithValue("messageId", messageId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+
+        return new JobPosting(
+            Title: reader.GetString(0),
+            Company: reader.GetString(1),
+            Location: reader.GetString(2),
+            Category: reader.GetString(3),
+            ApplyUrl: reader.GetString(4),
+            Description: reader.GetString(5));
+    }
+
     public async Task<IReadOnlyList<SimilarPosting>> QuerySimilarAsync(float[] queryEmbedding, int topK, CancellationToken cancellationToken = default)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
