@@ -23,6 +23,12 @@ var config = builder.Configuration;
 // TargetCategories/Profile/ScoringTopK from appsettings. Injected later as IOptions<JobLensOptions>.
 builder.Services.Configure<JobLensOptions>(config.GetSection("JobLens"));
 
+// Rezi base resume IDs and the "for edit" slot ID identify this account's resumes, so like
+// GroupChatJids they live in user-secrets, never appsettings. Not validated at startup (unlike
+// Postgres/Gemini) - resume tailoring is on-demand, not on the always-on ingest/run path, so a
+// missing value fails clearly at first actual use (GeminiResumeTailor) rather than blocking /health.
+builder.Services.Configure<ReziOptions>(config.GetSection("Rezi"));
+
 // Postgres + pgvector data source, and the Gemini clients, are resolved lazily (factory
 // delegates read IConfiguration at first resolution, not here). This isn't just style:
 // a factory only runs on first actual use, which happens after builder.Build() - so
@@ -73,6 +79,7 @@ builder.Services.AddSingleton<ITokenCache>(sp => new EncryptedFileTokenCache(
     ReziMcpConnection.DefaultTokenCachePath, sp.GetRequiredService<ILogger<EncryptedFileTokenCache>>()));
 #pragma warning restore CA1416
 builder.Services.AddSingleton<IResumeClient, RealResumeClient>();
+builder.Services.AddSingleton<IResumeTailor, GeminiResumeTailor>();
 
 builder.Services.AddOpenApi();
 

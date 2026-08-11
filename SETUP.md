@@ -84,11 +84,26 @@ dotnet user-secrets set "Postgres:ConnectionString" "Host=localhost;Port=5432;Da
 dotnet user-secrets set "JobLens:MessagesDbPath" "C:/path/to/whatsapp-mcp/whatsapp-bridge/store/messages.db"
 dotnet user-secrets set "JobLens:GroupChatJids:0" "120363427094606388@g.us"
 dotnet user-secrets set "JobLens:GroupChatJids:1" "<second_group_chat_jid>"
+dotnet user-secrets set "Rezi:BaseResumes:0:Name" "QA Automation Developer"
+dotnet user-secrets set "Rezi:BaseResumes:0:Id" "<qa_automation_developer_resume_id>"
+dotnet user-secrets set "Rezi:BaseResumes:1:Name" "Junior Backend Engineer"
+dotnet user-secrets set "Rezi:BaseResumes:1:Id" "<junior_backend_engineer_resume_id>"
+dotnet user-secrets set "Rezi:BaseResumes:2:Name" "Full Stack Developer"
+dotnet user-secrets set "Rezi:BaseResumes:2:Id" "<full_stack_developer_resume_id>"
+dotnet user-secrets set "Rezi:ForEditResumeId" "<for_edit_resume_id>"
 ```
 Use forward slashes in the path even on Windows, and give the full absolute path.
 `GroupChatJids` is a list, so each group gets its own indexed key
 (`:0`, `:1`, ...); it stays in user-secrets rather than appsettings.json
 because a chat_jid identifies a real WhatsApp group.
+
+`Rezi:BaseResumes` is likewise a list in user-secrets, not appsettings - the IDs
+identify resumes in one specific Rezi account. `IResumeTailor` (Phase 2) reads
+these three bases and picks the best-fit one per posting; it never writes to
+them. `ForEditResumeId` isn't read until Phase 3's write step. Find your own
+resume IDs with `list_resumes` via `dotnet run --project tools/ReziLogin`
+(prints resume names next to their ids) after completing the re-login in
+section 7 below.
 
 Committed `appsettings.json` holds only non-identifying config, the target
 category list:
