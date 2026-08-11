@@ -56,7 +56,7 @@ public sealed class RealResumeClient(ITokenCache tokenCache, ILogger<RealResumeC
                 var client = await GetClientAsync(cancellationToken);
                 var result = await client.CallToolAsync(toolName, arguments, cancellationToken: cancellationToken);
                 var text = result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text;
-                return text is null ? null : JsonNode.Parse(text);
+                return ReziToolResultParser.Parse(toolName, result.IsError, text);
             }
             catch (HttpRequestException ex) when (
                 ex.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable
@@ -67,6 +67,14 @@ public sealed class RealResumeClient(ITokenCache tokenCache, ILogger<RealResumeC
                     "Rezi tool call '{Tool}' hit {Status} (attempt {Attempt}/{Max}); retrying in {Delay}.",
                     toolName, ex.StatusCode, attempt, MaxAttempts, delay);
                 await Task.Delay(delay, cancellationToken);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                // Extra safety net alongside ConnectAsync's pre-check and
+                // RefuseInteractiveLoginAsync: a genuine 401 on an actual tool call (e.g. Rezi
+                // revoked the token server-side before our local ExpiresIn clock expected it)
+                // is an auth problem, not a generic failure - map it the same way.
+                throw new ReziAuthenticationRequiredException();
             }
         }
     }

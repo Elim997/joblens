@@ -211,10 +211,23 @@ app.MapPost("/tailor", async (
     ResumeTailoringRunner runner,
     CancellationToken cancellationToken) =>
 {
-    var result = await runner.RunAsync(messageId, commit, cancellationToken);
-    return result is null
-        ? Results.NotFound(new { error = $"No stored posting found for messageId '{messageId}'." })
-        : Results.Ok(result);
+    try
+    {
+        var result = await runner.RunAsync(messageId, commit, cancellationToken);
+        return result is null
+            ? Results.NotFound(new { error = $"No stored posting found for messageId '{messageId}'." })
+            : Results.Ok(result);
+    }
+    catch (ReziAuthenticationRequiredException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+    catch (ReziToolCallException ex)
+    {
+        // Rezi itself reported a failure (not auth, not a JobLens bug) - a legible 502
+        // ("upstream failed") beats an opaque unhandled-exception 500.
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
+    }
 });
 
 app.Run();
