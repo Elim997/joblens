@@ -140,3 +140,22 @@ fallback that also implements `IChatClient`.
 
 Do not let it scaffold a frontend, app Dockerfile, or Telegram source until the
 WhatsApp-to-notify loop runs end to end and the eval passes.
+
+## 7. Rezi resume tailoring: re-login
+
+`IResumeClient` talks to Rezi's MCP server (`https://api.rezi.ai/mcp`), which uses OAuth
+2.1 with no refresh token - access tokens last about 30 days, and getting a new one
+always requires a one-time interactive browser sign-in (see the Phase 0 spike in
+`spikes/rezi-mcp-auth-spike/` for why: confirmed live against Rezi's own OAuth discovery
+metadata). The running `JobLens.Api` service never opens a browser itself - if the token
+is missing or has expired, any resume-tailoring call fails immediately with a
+`ReziAuthenticationRequiredException` telling you to do this:
+
+```
+dotnet run --project tools/ReziLogin
+```
+
+This opens your browser to Rezi's sign-in page once, then saves a fresh ~30-day token to
+an encrypted local cache (`%LOCALAPPDATA%\JobLens\rezi-token.dat`, DPAPI-protected,
+gitignored, never committed). `JobLens.Api` picks up the new token automatically on its
+very next request - no restart needed. You'll need to do this roughly once a month.

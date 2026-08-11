@@ -5,10 +5,12 @@ using JobLens.Core.Feed;
 using JobLens.Core.Notification;
 using JobLens.Core.Parsing;
 using JobLens.Core.Pipeline;
+using JobLens.Core.Resume;
 using JobLens.Core.Scoring;
 using JobLens.Core.Storage;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol.Authentication;
 using Npgsql;
 using OpenAI;
 using Pgvector;            // for UseVector()
@@ -62,6 +64,15 @@ builder.Services.AddSingleton<IRelevanceScorer, GeminiRelevanceScorer>();
 builder.Services.AddSingleton<INotifier, ConsoleNotifier>();
 builder.Services.AddSingleton<PipelineRunner>();
 builder.Services.AddSingleton<EvalHarness>();
+
+// EncryptedFileTokenCache is DPAPI-backed and Windows-only; this project already assumes
+// Windows (see SETUP.md), so the platform-compat warning is suppressed at this one call site
+// rather than tagging the whole assembly, which would incorrectly mark unrelated endpoints too.
+#pragma warning disable CA1416
+builder.Services.AddSingleton<ITokenCache>(sp => new EncryptedFileTokenCache(
+    ReziMcpConnection.DefaultTokenCachePath, sp.GetRequiredService<ILogger<EncryptedFileTokenCache>>()));
+#pragma warning restore CA1416
+builder.Services.AddSingleton<IResumeClient, RealResumeClient>();
 
 builder.Services.AddOpenApi();
 

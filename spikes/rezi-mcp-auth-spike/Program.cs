@@ -10,6 +10,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Web;
 
 var serverUrl = "https://api.rezi.ai/mcp";
@@ -67,22 +68,73 @@ foreach (var tool in tools)
 }
 Console.WriteLine();
 
-if (tools.Any(t => t.Name == "list_resumes"))
+foreach (var toolName in new[] { "read_resume", "write_resume", "get_resume_format" })
 {
-    Console.WriteLine("Calling list_resumes...");
-    var result = await client.CallToolAsync("list_resumes", new Dictionary<string, object?>());
-    foreach (var block in result.Content)
-    {
-        if (block is TextContentBlock text)
-        {
-            Console.WriteLine("Result: " + text.Text);
-        }
-    }
+    var tool = tools.FirstOrDefault(t => t.Name == toolName);
+    Console.WriteLine($"=== {toolName} inputSchema ===");
+    Console.WriteLine(tool is null ? "(not found)" : tool.JsonSchema.ToString());
+    Console.WriteLine();
 }
-else
+
+Console.WriteLine("=== get_resume_format() ===");
+var formatResult = await client.CallToolAsync("get_resume_format", new Dictionary<string, object?>());
+foreach (var block in formatResult.Content)
 {
-    Console.WriteLine("list_resumes tool not found on server.");
+    if (block is TextContentBlock text) Console.WriteLine(text.Text);
 }
+Console.WriteLine();
+
+const string forEditId = "V22et70NfJ4jCcE1L9h0";
+
+async Task<JsonNode> ReadAsync()
+{
+    var result = await client.CallToolAsync("read_resume", new Dictionary<string, object?> { ["resume_id"] = forEditId });
+    var text = result.Content.OfType<TextContentBlock>().Single().Text;
+    return JsonNode.Parse(text)!;
+}
+
+async Task<string> ReadSummaryAsync()
+{
+    var resume = await ReadAsync();
+    return resume["data"]!["summary"]!["summary"]!.GetValue<string>();
+}
+
+var originalSummary = await ReadSummaryAsync();
+Console.WriteLine($"=== original summary ===\n{originalSummary}\n");
+
+const string marker = " [joblens-phase1-roundtrip-test]";
+var markedSummary = originalSummary + marker;
+
+Console.WriteLine("=== write_resume: appending round-trip marker ===");
+var writePayload = new JsonObject
+{
+    ["data"] = new JsonObject { ["summary"] = new JsonObject { ["summary"] = markedSummary } },
+};
+await client.CallToolAsync("write_resume", new Dictionary<string, object?>
+{
+    ["resume_id"] = forEditId,
+    ["resume"] = writePayload,
+});
+
+var afterWrite = await ReadSummaryAsync();
+Console.WriteLine($"=== summary after write ===\n{afterWrite}\n");
+Console.WriteLine(afterWrite == markedSummary ? "MARKER PRESENT - write round-tripped." : "MISMATCH - marker not found as expected!");
+
+Console.WriteLine();
+Console.WriteLine("=== write_resume: restoring original summary ===");
+var restorePayload = new JsonObject
+{
+    ["data"] = new JsonObject { ["summary"] = new JsonObject { ["summary"] = originalSummary } },
+};
+await client.CallToolAsync("write_resume", new Dictionary<string, object?>
+{
+    ["resume_id"] = forEditId,
+    ["resume"] = restorePayload,
+});
+
+var afterRestore = await ReadSummaryAsync();
+Console.WriteLine($"=== summary after restore ===\n{afterRestore}\n");
+Console.WriteLine(afterRestore == originalSummary ? "RESTORED - matches original exactly." : "MISMATCH - restore did not match original!");
 
 /// Handles the OAuth authorization URL by starting a local HTTP server and opening a browser.
 static async Task<AuthorizationResult?> HandleAuthorizationUrlAsync(
