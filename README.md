@@ -62,7 +62,10 @@ REST API - only an MCP server. Reaching it meant building a real MCP client with
 the official C# `ModelContextProtocol` SDK, including working through OAuth 2.1
 registration quirks specific to Rezi's server and a hybrid text+JSON tool-response
 format that isn't documented anywhere - not just calling a REST endpoint with a
-different label.
+different label. A latent bug here (a test that verified the write's side effect
+by reading the resume back, but never actually parsed the write call's own
+response) sat invisible for two phases - a reminder that a test is only as strong
+as what it asserts, not what it happens to exercise.
 
 **DPAPI-encrypted token cache.** Rezi's OAuth access tokens last ~30 days with no
 refresh token, so a long-running service needs to persist and reuse a token across
@@ -130,7 +133,7 @@ running:
 | `POST /run` | Scores every unscored posting in the archive against the profile and notifies matches. |
 | `GET /matches` | Stored matches (score at or above threshold) from past runs. |
 | `GET /query?text=...` | Semantic search over the embedded posting archive. |
-| `POST /tailor?messageId=X&commit=false` | Previews (default) or commits an AI-tailored resume rewrite for one stored posting. |
+| `POST /tailor?messageId=X&commit=false` | Previews (default) or, with `commit=true`, writes an AI-tailored resume rewrite back to Rezi for one stored posting. |
 | `POST /eval` | Runs the hand-labeled set through the real scoring pipeline and reports precision/recall/F1. |
 
 63 tests pass (xUnit; a handful of integration tests need a live Postgres/Gemini/Rezi
