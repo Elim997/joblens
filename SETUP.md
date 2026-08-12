@@ -174,3 +174,62 @@ This opens your browser to Rezi's sign-in page once, then saves a fresh ~30-day 
 an encrypted local cache (`%LOCALAPPDATA%\JobLens\rezi-token.dat`, DPAPI-protected,
 gitignored, never committed). `JobLens.Api` picks up the new token automatically on its
 very next request - no restart needed. You'll need to do this roughly once a month.
+
+## 8. One-command dev startup
+
+Once steps 1-5 have been done at least once (bridge cloned and logged in, Postgres
+container created, secrets set), `scripts/start-joblens.ps1` starts the whole stack -
+Postgres, the WhatsApp bridge, and the API - with one command.
+
+**One-time setup:**
+```
+cd scripts
+copy dev-config.ps1.example dev-config.ps1
+notepad dev-config.ps1   # fill in BridgeDir, ApiProjectPath, etc.
+```
+`dev-config.ps1` is gitignored (machine-specific paths, never committed).
+
+**Every time after that:**
+```
+.\scripts\start-joblens.ps1
+```
+
+**What it does, in order:**
+1. Checks the `joblens-pg` Docker container: starts it if it exists but is stopped,
+   leaves it alone if already running. Never creates or recreates it - if it doesn't
+   exist yet, the script stops and points you back to step 3.
+2. Checks whether the WhatsApp bridge is already up (first by a PID file this script
+   itself writes, then by whether anything is listening on its port, 8080 by default).
+   If not, it starts `go run main.go` in the bridge's own console window, in the
+   bridge's directory - so a first-run QR prompt is visible there and the bridge's
+   own log output stays visible throughout. Never touches the bridge's session files
+   or `messages.db`, and never starts a second bridge process if one is already up.
+3. Runs `dotnet run` for `JobLens.Api` in the current window. **Ctrl+C here stops
+   everything this script started.**
+4. On exit, stops only the bridge window *this run* started (a tree-kill, since `go
+   run` spawns the actual bridge process as a child of `go.exe`, which is itself a
+   child of the window's shell). If the bridge was already running before this script
+   ran, it's left alone - the script never stops something it didn't start. Postgres
+   is always left running.
+
+**Verifying the bridge is actually live:**
+- Its own console window logs `✓ Connected to WhatsApp!` once connected, and keeps
+  logging as messages arrive.
+- Or watch `messages.db` grow: `(Get-Item $MessagesDbPath).Length` (from
+  `dev-config.ps1`'s value), run twice a minute or two apart while the group is
+  active. For exact row counts, use the `sqlite3` CLI or DB Browser for SQLite as
+  described in step 2.
+
+**Known limitations:**
+- Windows/PowerShell only, matching the rest of this repo's dev setup.
+- First-time bridge login still needs a human to scan the QR code in the bridge's
+  window - that step isn't and can't be automated by this script.
+- Assumes Go, Docker, and the .NET SDK are already installed (steps 0/1/3/4) and the
+  Postgres container and bridge repo already exist - this script only starts things,
+  it never provisions them.
+- The bridge shutdown is a hard `taskkill /T /F` (tree-kill), not a graceful signal -
+  fine here because the bridge persists its session/messages to SQLite continuously,
+  not just on clean exit, but it means no graceful WhatsApp disconnect handshake.
+- If the bridge was started outside this script (e.g. you ran `go run main.go`
+  yourself in another window), this script detects and leaves it running, but can't
+  stop it for you on exit - close that window yourself when you're done.

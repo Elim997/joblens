@@ -1,0 +1,19 @@
+# Copy this file to dev-config.ps1 (same folder) and fill in your real paths.
+# dev-config.ps1 is gitignored - it's machine-specific, not committed.
+
+# Folder containing whatsapp-bridge's main.go (the lharries/whatsapp-mcp bridge).
+$BridgeDir = "C:\path\to\whatsapp-mcp\whatsapp-bridge"
+
+# Must match JobLens:MessagesDbPath in your JobLens.Api user-secrets (SETUP.md step 5).
+# Only used here for a sanity-check / status printout, not passed to the bridge.
+$MessagesDbPath = "C:\path\to\whatsapp-mcp\whatsapp-bridge\store\messages.db"
+
+# Folder containing JobLens.Api.csproj.
+$ApiProjectPath = "C:\path\to\joblens\src\JobLens.Api"
+
+# Name of the Postgres+pgvector container from SETUP.md step 3.
+$PostgresContainerName = "joblens-pg"
+
+# Port the bridge's REST API listens on once connected (main.go: startRESTServer(..., 8080)).
+# JobLens never calls this API - it's only used here as a "is the bridge already up" signal.
+$BridgePort = 8080
