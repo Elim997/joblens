@@ -1,5 +1,5 @@
 {
-  "caveat": "PLACEHOLDER LABELS. isRelevant below was auto-seeded from category membership (Software / QA / Machine Learning-AI = true, everything else = false), copying JobLens:TargetCategories. This is NOT a human judgment of relevance - it grades the scorer against the category filter it is supposed to go beyond, so precision/recall/F1 computed from these labels are meaningless as a real evaluation. Hand-correct isRelevant for each posting (read the description, decide if it actually fits the profile in appsettings.json) before trusting this report.",
+  "caveat": "isRelevant below started as a PLACEHOLDER auto-seeded from category membership (Software / QA / Machine Learning-AI = true, everything else = false, copying JobLens:TargetCategories as it stood at the time) and has since been hand-corrected: each posting was read against the profile in appsettings.json and re-labeled where category membership alone was wrong (e.g. an Aeronautics/EE navigation-algorithms posting under Software, or biomedical/mechanical-engineering roles under QA/ML). TargetCategories has since gained a fourth category, Automation, but none of the postings below fall in it, so it didn't affect these labels. Precision/recall/F1 computed from these labels reflect real human judgment, not just the category filter.",
   "postings": [
     {
       "messageId": "3EB0D1BDCDB2F145761492",
@@ -39,7 +39,7 @@
       "category": "Software",
       "applyUrl": "https://www.linkedin.com/jobs/view/4393501613",
       "description": "- Degree in Electrical Engineering, Aeronautics, or Mechanical Engineering (Bachelor's, Master's, or PhD)\n- At least 2 years of experience in navigation algorithms, estimation theory, and/or control",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB0D5D31C3D6DC461576F",
@@ -49,7 +49,7 @@
       "category": "Software",
       "applyUrl": "https://www.linkedin.com/jobs/view/4418934400",
       "description": "- 2+ years of professional experience with PixiJS\n- Strong JavaScript / TypeScript skills\n- Experience developing real-money gaming or casino-style games",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB0BCFD2D32947BB6CCDF",
@@ -59,7 +59,7 @@
       "category": "Software",
       "applyUrl": "https://www.linkedin.com/jobs/view/4414896446",
       "description": "- Minimum 2 years of experience with Force.com developer toolkit (Apex, VisualForce, Lightning Web Components, Force.com IDE, Force.com Migration Tool, Web Services/SOA & Metadata APIs)\n- Minimum 2 years of proficiency with front-end technologies (HTML, CSS, JavaScript)\n- Minimum 2 years of experience and familiarity with Services Oriented Design principles (SOA) and Web Services",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB08148A7386C07B97036",
@@ -79,7 +79,7 @@
       "category": "QA",
       "applyUrl": "https://www.linkedin.com/jobs/view/4375559553",
       "description": "- Bachelor’s degree in Mechanical Engineering / Electronics / Materials / Industrial Engineering and Management / Chemistry\n- Ability to read and write technical English at a good level\n- Willingness to work intensely under heavy workload and short deadlines",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB087F59BC31D2C4312DB",
@@ -119,7 +119,7 @@
       "category": "QA",
       "applyUrl": "https://www.linkedin.com/jobs/view/4419801563",
       "description": "- Bachelor’s degree in Biomedical Engineering OR at least 1 year of experience as a Dental Hygienist or Dental Assistant\n- Ability to learn and work with complex systems\n- Excellent analytical skills and strong attention to detail",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB06BE4043F90E631A722",
@@ -129,7 +129,7 @@
       "category": "Machine Learning/AI",
       "applyUrl": "https://www.comeet.com/jobs/codevalue/81.009/data-scientist-python/25.76B",
       "description": "- 2–3 years of experience as a Data Scientist\n- 2–3 years of hands-on experience developing solutions in Python\n- Experience with Machine Learning and Deep Learning methodologies",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB017007E1949C8D7A844",
@@ -139,7 +139,7 @@
       "category": "Machine Learning/AI",
       "applyUrl": "https://www.linkedin.com/jobs/view/4415220010",
       "description": "- B.Sc. in Mechanical Engineering (or similar) with at least 1 year of hands-on experience\n- Strong SolidWorks skills\n- Solid understanding of engineering drawings and GD&T",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB0930E5552FC946C2022",
@@ -149,7 +149,7 @@
       "category": "Machine Learning/AI",
       "applyUrl": "https://www.linkedin.com/jobs/view/4408665561",
       "description": "- Degree in biomedical engineering, bioinformatics, or a related field\n- High level of computer proficiency\n- Ability to perform data and basic statistical analysis using Excel",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB01C26C5B2FB7098930F",
