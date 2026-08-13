@@ -200,6 +200,30 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task UpsertAsync_SameMessageIdTwice_DoesNotThrowAndStoresExactlyOneRow()
+    {
+        var id = $"test-idempotency-dup-{Guid.NewGuid():N}";
+        _testMessageIds.Add(id);
+
+        var posting = new JobPosting(
+            "Idempotency Test Posting", "Acme", "Tel Aviv", "Software",
+            "https://example.com/idempotency", "- re-ingested message must be a no-op");
+        var embedding = await _embedder.EmbedAsync(JobPostingTextNormalizer.ToEmbeddingText(posting));
+        await _datastore.EnsureSchemaAsync(embedding.Length);
+
+        await _datastore.UpsertAsync(id, posting, embedding);
+        await _datastore.UpsertAsync(id, posting, embedding); // re-ingest of the same source message - must not throw
+
+        await using var connection = await _dataSource.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM job_postings WHERE message_id = @messageId;";
+        command.Parameters.AddWithValue("messageId", id);
+        var count = (long)(await command.ExecuteScalarAsync())!;
+
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
     public async Task GetExistingMessageIdsAsync_ReflectsStoredRows()
     {
         var id = $"test-milestone4-dedupe-{Guid.NewGuid():N}";

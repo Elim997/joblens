@@ -149,7 +149,7 @@ app.MapPost("/ingest", async (
         parsed = parsedCount,
         filteredOut = parsedCount - candidates.Count,
         alreadyStored = candidates.Count - toEmbed.Count,
-        embedded = toEmbed.Count,
+        newlyStored = toEmbed.Count,
         matches,
     });
 });

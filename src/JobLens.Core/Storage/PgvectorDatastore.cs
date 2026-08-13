@@ -77,17 +77,14 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+        // message_id is the primary key, so a duplicate is already rejected at the DB
+        // level - ON CONFLICT DO NOTHING makes a re-ingest of a known message a clean
+        // no-op instead of relying on the caller to pre-filter (Program.cs already does,
+        // via GetExistingMessageIdsAsync, but this is the guard for a concurrent race).
         command.CommandText = """
             INSERT INTO job_postings (message_id, title, company, location, category, apply_url, description, embedding)
             VALUES (@messageId, @title, @company, @location, @category, @applyUrl, @description, @embedding)
-            ON CONFLICT (message_id) DO UPDATE SET
-                title = EXCLUDED.title,
-                company = EXCLUDED.company,
-                location = EXCLUDED.location,
-                category = EXCLUDED.category,
-                apply_url = EXCLUDED.apply_url,
-                description = EXCLUDED.description,
-                embedding = EXCLUDED.embedding;
+            ON CONFLICT (message_id) DO NOTHING;
             """;
         command.Parameters.AddWithValue("messageId", messageId);
         command.Parameters.AddWithValue("title", posting.Title);
