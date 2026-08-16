@@ -81,7 +81,7 @@ public class PipelineRunnerTests
     [Fact]
     public async Task RunAsync_ScorerReturnsEmpty_NothingIsMarkedSoItCanBeRetried()
     {
-        // Simulates GeminiRelevanceScorer giving up after a malformed model response.
+        // Simulates LlmRelevanceScorer giving up after a malformed model response.
         var datastore = new FakeDatastore();
         datastore.Seed("id-1", MakePosting("Unscoreable"), [1f, 0f, 0f]);
 

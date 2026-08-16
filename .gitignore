@@ -4,3 +4,8 @@ obj/
 .vs/
 scripts/dev-config.ps1
 scripts/.run/
+.env
+.env.*
+!.env.example
+node_modules/
+.claude/

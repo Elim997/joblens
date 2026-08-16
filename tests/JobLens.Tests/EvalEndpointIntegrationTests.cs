@@ -5,10 +5,10 @@ using Microsoft.Extensions.Configuration;
 
 namespace JobLens.Tests;
 
-// Needs real Gemini quota (SETUP.md step 5) for the batch embedding + scoring calls
-// POST /eval makes against the real Eval/labeled-postings.json shipped with the app.
-// Postgres:ConnectionString is still required to build the app's DI graph (Program.cs
-// wires NpgsqlDataSource unconditionally) but is never queried - /eval never touches IDatastore.
+// Needs real Gemini embedding quota plus a running, configured OmniRoute for the
+// batch embedding and scoring calls POST /eval makes against labeled-postings.json.
+// Postgres:ConnectionString is required by startup validation but is never queried -
+// /eval does not touch IDatastore.
 [Trait("Category", "Integration")]
 public class EvalEndpointIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
 {
@@ -25,6 +25,14 @@ public class EvalEndpointIntegrationTests : IClassFixture<WebApplicationFactory<
             ?? throw new InvalidOperationException("Missing Gemini:ApiKey - run SETUP.md step 5.");
         var pgConn = secrets["Postgres:ConnectionString"]
             ?? throw new InvalidOperationException("Missing Postgres:ConnectionString - run SETUP.md step 3.");
+        var llmBaseUrl = secrets["Llm:BaseUrl"]
+            ?? throw new InvalidOperationException("Missing Llm:BaseUrl - see SETUP.md.");
+        var llmApiKey = secrets["Llm:ApiKey"]
+            ?? throw new InvalidOperationException("Missing Llm:ApiKey - see SETUP.md.");
+        var scoringModel = secrets["Llm:ScoringModel"]
+            ?? throw new InvalidOperationException("Missing Llm:ScoringModel - see SETUP.md.");
+        var tailoringModel = secrets["Llm:TailoringModel"]
+            ?? throw new InvalidOperationException("Missing Llm:TailoringModel - see SETUP.md.");
 
         _factory = factory.WithWebHostBuilder(builder =>
         {
@@ -36,13 +44,17 @@ public class EvalEndpointIntegrationTests : IClassFixture<WebApplicationFactory<
                     ["JobLens:GroupChatJids:0"] = "fake@g.us",
                     ["Postgres:ConnectionString"] = pgConn,
                     ["Gemini:ApiKey"] = geminiKey,
+                    ["Llm:BaseUrl"] = llmBaseUrl,
+                    ["Llm:ApiKey"] = llmApiKey,
+                    ["Llm:ScoringModel"] = scoringModel,
+                    ["Llm:TailoringModel"] = tailoringModel,
                 });
             });
         });
     }
 
     [Fact]
-    public async Task Eval_RealGeminiCall_ReturnsReportWithCaveatSurfacedTopLevel()
+    public async Task Eval_RealEmbeddingAndScoringCalls_ReturnsReportWithCaveatSurfacedTopLevel()
     {
         var client = _factory.CreateClient();
 

@@ -3,16 +3,32 @@ using JobLens.Core.Resume;
 
 namespace JobLens.Tests.Resume;
 
-// Returns a canned TailoredResume under test control, so ResumeTailoringRunnerTests can
-// isolate the runner's own commit/guardrail/404 logic from GeminiResumeTailor's behavior
-// (already covered by GeminiResumeTailorTests).
-public class FakeResumeTailor(TailoredResume result) : IResumeTailor
+// Returns a canned ValidatedTailoredResume (or throws a configured exception) under test control,
+// so ResumeTailoringRunnerTests/TailorEndpointTests can isolate the runner's/endpoint's own
+// commit/guardrail/status-code logic from LlmResumeTailor's behavior (already covered by
+// LlmResumeTailorTests). Honors cancellation the same way the real tailor's model calls do.
+public class FakeResumeTailor : IResumeTailor
 {
+    private readonly ValidatedTailoredResume? _result;
+    private readonly Exception? _exception;
+
+    public FakeResumeTailor(ValidatedTailoredResume result) => _result = result;
+
+    public FakeResumeTailor(Exception exception) => _exception = exception;
+
     public JobPosting? LastPosting { get; private set; }
 
-    public Task<TailoredResume> TailorAsync(JobPosting posting, CancellationToken cancellationToken = default)
+    public int CallCount { get; private set; }
+
+    public Task<ValidatedTailoredResume> TailorAsync(JobPosting posting, CancellationToken cancellationToken = default)
     {
         LastPosting = posting;
-        return Task.FromResult(result);
+        CallCount++;
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (_exception is not null)
+            throw _exception;
+
+        return Task.FromResult(_result!);
     }
 }

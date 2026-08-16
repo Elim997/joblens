@@ -1,5 +1,6 @@
 using System.Text.Json;
 using JobLens.Core.Configuration;
+using JobLens.Core.Llm;
 using JobLens.Core.Parsing;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -7,12 +8,14 @@ using Microsoft.Extensions.Options;
 
 namespace JobLens.Core.Scoring;
 
-public class GeminiRelevanceScorer(
-    IChatClient chatClient,
+public class LlmRelevanceScorer(
+    IScoringChatClient scoringChatClient,
     IOptions<JobLensOptions> options,
-    ILogger<GeminiRelevanceScorer> logger) : IRelevanceScorer
+    ILogger<LlmRelevanceScorer> logger) : IRelevanceScorer
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    private IChatClient ChatClient => scoringChatClient.ChatClient;
 
     public async Task<IReadOnlyList<ScoredPosting>> ScoreAsync(
         IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)> candidates,
@@ -35,12 +38,27 @@ public class GeminiRelevanceScorer(
         // up on the whole batch rather than throw - a bad model response never crashes
         // the run, it just means nothing gets scored this time.
         List<ScoreResponseItem>? items = null;
-        for (var attempt = 1; attempt <= 2 && items is null; attempt++)
+        try
         {
-            var response = await chatClient.GetResponseAsync(messages, chatOptions, cancellationToken);
-            items = TryParse(response.Text);
-            if (items is null)
-                logger.LogWarning("Scoring response was not valid JSON on attempt {Attempt}/2.", attempt);
+            for (var attempt = 1; attempt <= 2 && items is null; attempt++)
+            {
+                var response = await ChatClient.GetResponseAsync(messages, chatOptions, cancellationToken);
+                items = TryParse(response.Text);
+                if (items is null)
+                    logger.LogWarning("Scoring response was not valid JSON on attempt {Attempt}/2.", attempt);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                "Scoring model request failed with {ExceptionType}; returning no matches for this batch of {Count}.",
+                ex.GetType().Name,
+                shortlist.Count);
+            return [];
         }
 
         if (items is null)

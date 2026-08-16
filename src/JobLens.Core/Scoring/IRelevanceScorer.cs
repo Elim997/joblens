@@ -9,8 +9,8 @@ public interface IRelevanceScorer
     /// <summary>
     /// Ranks candidates by cosine similarity to the profile embedding (cheap, local,
     /// no archive lookup), takes the configured top-K, and asks the model to score
-    /// only that shortlist with reasoning. A malformed model response never throws -
-    /// see GeminiRelevanceScorer for the exact fallback contract. The returned Id
+    /// only that shortlist with reasoning. Invalid model output and provider failures
+    /// degrade safely to no scores; see LlmRelevanceScorer for the exact contract. The returned Id
     /// lets a caller (e.g. PipelineRunner) mark exactly what was actually scored -
     /// candidates beyond the top-K cutoff, or an item the model's response failed to
     /// validate, are absent from the result and so never get marked.

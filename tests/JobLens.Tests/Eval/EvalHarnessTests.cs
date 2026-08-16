@@ -75,7 +75,7 @@ public class EvalHarnessTests
     public async Task RunAsync_ScorerDropsAPosting_TreatedAsPredictedNotRelevant()
     {
         // Simulates a posting outside the scorer's shortlist cutoff, or one the model's
-        // response failed to validate - GeminiRelevanceScorer never throws for either,
+        // response failed to validate - LlmRelevanceScorer never throws for either,
         // it just omits the id from its result.
         var labeled = MakeLabeledSet(("scored", true), ("dropped", true));
 

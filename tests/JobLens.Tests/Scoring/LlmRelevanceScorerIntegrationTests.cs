@@ -1,5 +1,6 @@
 using System.ClientModel;
 using JobLens.Core.Configuration;
+using JobLens.Core.Llm;
 using JobLens.Core.Parsing;
 using JobLens.Core.Scoring;
 using Microsoft.Extensions.AI;
@@ -10,27 +11,31 @@ using OpenAI;
 
 namespace JobLens.Tests.Scoring;
 
-// Needs real Gemini quota (SETUP.md step 5): one real chat completion call, no
-// Postgres and no embedding calls - candidate/profile "embeddings" here are just
-// small hand-picked vectors for the local cosine pre-rank, not real Gemini output.
+// Needs a running OmniRoute instance and configured Llm settings: one real chat
+// completion call, no Postgres and no embedding calls. Candidate/profile "embeddings"
+// are hand-picked vectors used only by the scorer's local cosine pre-rank.
 [Trait("Category", "Integration")]
-public class GeminiRelevanceScorerIntegrationTests
+public class LlmRelevanceScorerIntegrationTests
 {
     [Fact]
-    public async Task ScoreAsync_RealGeminiCall_ReturnsValidScoresAndReasoning()
+    public async Task ScoreAsync_RealOmniRouteCall_ReturnsValidScoresAndReasoning()
     {
         var config = new ConfigurationBuilder()
             .AddUserSecrets<Program>()
             .AddEnvironmentVariables()
             .Build();
 
-        var geminiKey = config["Gemini:ApiKey"]
-            ?? throw new InvalidOperationException("Missing Gemini:ApiKey - run SETUP.md step 5.");
+        var baseUrl = config["Llm:BaseUrl"]
+            ?? throw new InvalidOperationException("Missing Llm:BaseUrl - see SETUP.md.");
+        var apiKey = config["Llm:ApiKey"]
+            ?? throw new InvalidOperationException("Missing Llm:ApiKey - see SETUP.md.");
+        var scoringModel = config["Llm:ScoringModel"]
+            ?? throw new InvalidOperationException("Missing Llm:ScoringModel - see SETUP.md.");
 
-        var gemini = new OpenAIClient(
-            new ApiKeyCredential(geminiKey),
-            new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") });
-        IChatClient chatClient = gemini.GetChatClient("gemini-flash-latest").AsIChatClient();
+        var client = new OpenAIClient(
+            new ApiKeyCredential(apiKey),
+            new OpenAIClientOptions { Endpoint = new Uri(baseUrl) });
+        IChatClient chatClient = client.GetChatClient(scoringModel).AsIChatClient();
 
         var options = Options.Create(new JobLensOptions
         {
@@ -38,7 +43,10 @@ public class GeminiRelevanceScorerIntegrationTests
                       "building LLM agent pipelines and RAG systems, Postgres.",
             ScoringTopK = 2,
         });
-        var scorer = new GeminiRelevanceScorer(chatClient, options, NullLogger<GeminiRelevanceScorer>.Instance);
+        var scorer = new LlmRelevanceScorer(
+            new ScoringChatClient(chatClient),
+            options,
+            NullLogger<LlmRelevanceScorer>.Instance);
 
         var backendPosting = new JobPosting(
             "Junior .NET Backend Engineer", "Acme", "Tel Aviv", "Software",

@@ -12,8 +12,15 @@ to work against instead of mocks.
 - A C compiler for Windows: install MSYS2, then add its `ucrt64\bin` to PATH.
   The bridge's SQLite driver needs CGO, which needs a C compiler on Windows.
 - Git
-- One API key: a Google AI Studio key (free tier, no card). It covers both the
-  chat model and embeddings, so there is no separate embeddings signup.
+- A Google AI Studio key (free tier, no card) - embeddings only. Chat/reasoning
+  (relevance scoring and resume tailoring) does not use Gemini at all; see
+  "OmniRoute (external prerequisite)" below.
+- **OmniRoute**, running separately, reachable at whatever `Llm:BaseUrl` you
+  configure (e.g. `http://localhost:20128/v1`), with its own API key. OmniRoute
+  is not part of this repo and JobLens does not start it, stop it, manage its
+  process, or manage the provider OAuth sessions (Claude/Codex) behind it - see
+  the "OmniRoute (external prerequisite)" section below for the setup and
+  startup order this implies.
 
 ## 1. Stand up the WhatsApp bridge (read-only data source)
 ```
@@ -75,11 +82,43 @@ dotnet add src/JobLens.Core package Microsoft.Data.Sqlite
 Put `CLAUDE.md` at the repo root (you already have it).
 
 ## 5. Configure secrets and settings
-Secrets and machine-specific values, never committed (this repo may go public):
+
+### Required configuration keys
+
+| Key | Secret? | Purpose |
+|---|---|---|
+| `JobLens:MessagesDbPath` | No, but identifying (local path) | Path to the bridge's `messages.db`. |
+| `JobLens:GroupChatJids` | No, but identifying | List of WhatsApp group chat_jids to ingest from. |
+| `Postgres:ConnectionString` | Yes (has a password) | Local Postgres+pgvector connection. |
+| `Gemini:ApiKey` | Yes | Google AI Studio key - embeddings only (`gemini-embedding-001`, 1536 dimensions). |
+| `Llm:BaseUrl` | No | OmniRoute's base URL, e.g. `http://localhost:20128/v1`. |
+| `Llm:ApiKey` | Yes | OmniRoute's API key. Treat this as a real secret even though OmniRoute currently runs on localhost - a local-only key is still a key, and this repo does not assume "localhost" means "safe to expose." |
+| `Llm:ScoringModel` | No | Model ID OmniRoute routes relevance scoring through - normally `coding-fallback`. |
+| `Llm:TailoringModel` | No | Model ID OmniRoute routes resume tailoring through - a separately pinned model, **never** `coding-fallback` (`Program.ValidateRequiredConfig` refuses to start otherwise). Currently `cc/claude-sonnet-5` as a **provisional** default - see README.md's provider-architecture section for why. |
+
+Plus the existing `Rezi:*` keys below. `Program.ValidateRequiredConfig` fails
+fast at startup with a clear message if any required key above is missing or
+malformed - it never lets the app come up and fail later at first use.
+
+`Llm:BaseUrl`, `Llm:ScoringModel`, and `Llm:TailoringModel` aren't secret or
+identifying, so the checked-in `appsettings.json` already ships safe local
+defaults for them - you don't strictly need to set them yourself unless you
+want to override the default locally. `Gemini:ApiKey` and `Llm:ApiKey` are the
+two values that must never land in a tracked file.
+
+### User-secrets (preferred for local development)
+
+Secrets and machine-specific values, never committed (this repo may go public).
+Placeholders only below - fill in your own real values when you run these,
+not while implementing/reviewing documentation changes:
 ```
 cd src/JobLens.Api
 dotnet user-secrets init
-dotnet user-secrets set "Gemini:ApiKey" "your_google_ai_studio_key"
+dotnet user-secrets set "Gemini:ApiKey" "YOUR_GEMINI_API_KEY" --project src/JobLens.Api
+dotnet user-secrets set "Llm:ApiKey" "YOUR_OMNIROUTE_API_KEY" --project src/JobLens.Api
+dotnet user-secrets set "Llm:BaseUrl" "http://localhost:20128/v1" --project src/JobLens.Api
+dotnet user-secrets set "Llm:ScoringModel" "coding-fallback" --project src/JobLens.Api
+dotnet user-secrets set "Llm:TailoringModel" "cc/claude-sonnet-5" --project src/JobLens.Api
 dotnet user-secrets set "Postgres:ConnectionString" "Host=localhost;Port=5432;Database=joblens;Username=postgres;Password=postgres"
 dotnet user-secrets set "JobLens:MessagesDbPath" "C:/path/to/whatsapp-mcp/whatsapp-bridge/store/messages.db"
 dotnet user-secrets set "JobLens:GroupChatJids:0" "120363427094606388@g.us"
@@ -92,21 +131,37 @@ dotnet user-secrets set "Rezi:BaseResumes:2:Name" "Full Stack Developer"
 dotnet user-secrets set "Rezi:BaseResumes:2:Id" "<full_stack_developer_resume_id>"
 dotnet user-secrets set "Rezi:ForEditResumeId" "<for_edit_resume_id>"
 ```
+`Llm:TailoringModel = cc/claude-sonnet-5` above is the **provisional**
+default - not a final pin (see README.md). The `Llm:BaseUrl` /
+`Llm:ScoringModel` / `Llm:TailoringModel` commands above are optional
+overrides of `appsettings.json`'s already-safe defaults, not secrets; only
+`Gemini:ApiKey` and `Llm:ApiKey` are things user-secrets exists to protect.
+
 Use forward slashes in the path even on Windows, and give the full absolute path.
 `GroupChatJids` is a list, so each group gets its own indexed key
 (`:0`, `:1`, ...); it stays in user-secrets rather than appsettings.json
 because a chat_jid identifies a real WhatsApp group.
 
 `Rezi:BaseResumes` is likewise a list in user-secrets, not appsettings - the IDs
-identify resumes in one specific Rezi account. `IResumeTailor` (Phase 2) reads
-these three bases and picks the best-fit one per posting; it never writes to
-them. `ForEditResumeId` isn't read until Phase 3's write step. Find your own
+identify resumes in one specific Rezi account. `IResumeTailor` reads
+these bases and picks the best-fit one per posting; it never writes to
+them. `ForEditResumeId` is the only slot `/tailor?commit=true` ever writes to -
+see README.md's `/tailor` safety contract. Find your own
 resume IDs with `list_resumes` via `dotnet run --project tools/ReziLogin`
 (prints resume names next to their ids) after completing the re-login in
 section 7 below.
 
-Committed `appsettings.json` holds only non-identifying config, the target
-category list:
+### Environment-variable equivalents
+
+Anywhere user-secrets isn't available (CI, containers, a non-dev machine), the
+same keys work as environment variables using .NET's `__` section-separator
+convention, e.g. `Llm__ApiKey`, `Llm__BaseUrl`, `Llm__ScoringModel`,
+`Llm__TailoringModel`, `Gemini__ApiKey`. The rest of the keys above follow the
+same pattern (`Postgres__ConnectionString`, `JobLens__MessagesDbPath`, ...).
+
+Committed `appsettings.json` holds only non-secret, non-identifying config -
+the `Llm:BaseUrl`/`Llm:ScoringModel`/`Llm:TailoringModel` defaults from the
+table above, plus the target category list:
 ```json
 "JobLens": {
   "TargetCategories": [ "Software", "QA" ]
@@ -115,6 +170,25 @@ category list:
 There is no sender allowlist. The source filters by `chat_jid IN (...)` and
 skips media-only rows; job vs promo is decided by content structure.
 
+### OmniRoute (external prerequisite)
+
+OmniRoute is not part of this repo. JobLens treats it purely as an external
+chat/reasoning provider reachable at `Llm:BaseUrl`: it doesn't start it, stop
+it, manage its process, manage the provider OAuth sessions behind it (Claude,
+Codex), refresh those tokens, or implement any provider-specific quota/retry
+logic - all of that is OmniRoute's job, not JobLens's. The normal dev flow is:
+
+1. Start OmniRoute yourself (e.g. `omniroute serve`), and make sure it's
+   listening at whatever host/port you put in `Llm:BaseUrl`.
+2. Start whichever other local infrastructure JobLens needs (Postgres, the
+   WhatsApp bridge - steps 1 and 3 above).
+3. Run JobLens.
+
+Gemini stays a separate, embeddings-only dependency - it doesn't go through
+OmniRoute, and OmniRoute doesn't need to be up for anything embeddings-only
+(e.g. `/query`'s embed-then-search step still needs Gemini, but never touches
+OmniRoute; only `/run` and `/tailor` need OmniRoute reachable).
+
 Register pgvector with Npgsql in `Program.cs`:
 ```csharp
 var dataSourceBuilder = new NpgsqlDataSourceBuilder(connString);
@@ -122,20 +196,31 @@ dataSourceBuilder.UseVector();
 var dataSource = dataSourceBuilder.Build();
 ```
 
-Register Gemini through the OpenAI client pointed at its compatibility endpoint,
-exposed as the Microsoft.Extensions.AI abstractions:
+Register Gemini embeddings and the two OmniRoute chat-client roles separately -
+this is what `Program.cs` actually does today, not a single shared client:
 ```csharp
+// Gemini: embeddings only, via its OpenAI-compatible endpoint.
 var gemini = new OpenAIClient(
     new ApiKeyCredential(geminiKey),
     new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") });
-
-IChatClient chat = gemini.GetChatClient("gemini-flash-latest").AsIChatClient();
 IEmbeddingGenerator<string, Embedding<float>> embeddings =
     gemini.GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator();
+
+// OmniRoute: all chat/reasoning, as two independently-configured roles - never
+// one shared/unqualified IChatClient.
+IChatClient CreateOmniRouteChatClient(LlmOptions options, string model)
+{
+    var client = new OpenAIClient(
+        new ApiKeyCredential(options.ApiKey),
+        new OpenAIClientOptions { Endpoint = new Uri(options.BaseUrl) });
+    return client.GetChatClient(model).AsIChatClient();
+}
+IScoringChatClient scoring = new ScoringChatClient(CreateOmniRouteChatClient(llm, llm.ScoringModel));
+ITailoringChatClient tailoring = new TailoringChatClient(CreateOmniRouteChatClient(llm, llm.TailoringModel));
 ```
-Confirm the OpenAI .NET SDK behaves against the compatibility endpoint. If you
-hit friction, a community Gemini .NET package (e.g. Mscc.GenerativeAI) is a
-fallback that also implements `IChatClient`.
+Confirm the OpenAI .NET SDK behaves against both compatibility endpoints (see
+README.md's provider-architecture section for exactly what's verified about
+OmniRoute's Chat Completions compatibility vs. what's still intended-only).
 
 ## 6. Hand off to Claude Code
 - Open the repo folder in VS Code and start Claude Code.

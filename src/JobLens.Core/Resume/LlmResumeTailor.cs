@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using JobLens.Core.Configuration;
 using JobLens.Core.Embedding;
+using JobLens.Core.Llm;
 using JobLens.Core.Parsing;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -10,21 +11,28 @@ using Microsoft.Extensions.Options;
 namespace JobLens.Core.Resume;
 
 /// <summary>
-/// IResumeTailor over Gemini + IResumeClient. Bases are read-only: this class only ever calls
+/// IResumeTailor over a role-specific chat client + IResumeClient. Bases are read-only: this class only ever calls
 /// IResumeClient.ReadResumeAsync, never WriteResumeAsync - see Phase 3 for the write step.
+///
+/// Model output never crosses this boundary trusted: the rewrite is parsed into UntrustedRewrite
+/// (every field nullable), and the only way to turn that into the ValidatedTailoredResume this
+/// class returns is ResumeTailoringValidator - the sole place that decides a model response is
+/// usable.
 /// </summary>
-public class GeminiResumeTailor(
+public class LlmResumeTailor(
     IResumeClient resumeClient,
-    IChatClient chatClient,
+    ITailoringChatClient tailoringChatClient,
     IOptions<ReziOptions> options,
-    ILogger<GeminiResumeTailor> logger) : IResumeTailor
+    ILogger<LlmResumeTailor> logger) : IResumeTailor
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    private IChatClient ChatClient => tailoringChatClient.ChatClient;
 
     private readonly SemaphoreSlim _baseSummariesLock = new(1, 1);
     private IReadOnlyList<BaseResumeSummary>? _baseSummaries;
 
-    public async Task<TailoredResume> TailorAsync(JobPosting posting, CancellationToken cancellationToken = default)
+    public async Task<ValidatedTailoredResume> TailorAsync(JobPosting posting, CancellationToken cancellationToken = default)
     {
         var bases = await GetBaseSummariesAsync(cancellationToken);
         var selection = await SelectBaseAsync(posting, bases, cancellationToken);
@@ -32,18 +40,18 @@ public class GeminiResumeTailor(
         var baseResume = await resumeClient.ReadResumeAsync(selection.BaseResumeId, cancellationToken)
             ?? throw new InvalidOperationException($"Base resume '{selection.BaseResumeName}' ({selection.BaseResumeId}) not found.");
 
-        var originalSummary = baseResume["data"]?["summary"]?["summary"]?.GetValue<string>() ?? "";
-        var originalExperience = ExtractItems(baseResume, "experience", "description");
-        var originalSkills = ExtractItems(baseResume, "skills", "skill");
-
-        var rewrite = await RewriteAsync(posting, selection, originalSummary, originalExperience, originalSkills, cancellationToken);
-
-        return new TailoredResume(
+        var snapshot = new BaseResumeSnapshot(
             selection,
-            string.IsNullOrWhiteSpace(rewrite.Summary) ? originalSummary : rewrite.Summary,
-            MergeItems(originalExperience, rewrite.Experience, "experience").Select(i => new TailoredExperienceItem(i.ItemId, i.Text)).ToList(),
-            MergeItems(originalSkills, rewrite.Skills, "skills").Select(i => new TailoredSkillItem(i.ItemId, i.Text)).ToList(),
-            rewrite.Rationale);
+            baseResume["data"]?["summary"]?["summary"]?.GetValue<string>() ?? "",
+            ExtractItems(baseResume, "experience", "description"),
+            ExtractItems(baseResume, "skills", "skill"));
+
+        var rewrite = await RewriteAsync(posting, snapshot, cancellationToken);
+
+        // The only place a ValidatedTailoredResume can be produced: Validate() throws
+        // ResumeTailoringValidationException rather than let a malformed or dishonest rewrite
+        // cross into a trusted result.
+        return ResumeTailoringValidator.Validate(snapshot, rewrite);
     }
 
     private async Task<IReadOnlyList<BaseResumeSummary>> GetBaseSummariesAsync(CancellationToken cancellationToken)
@@ -93,35 +101,35 @@ public class GeminiResumeTailor(
         };
         var chatOptions = new ChatOptions { ResponseFormat = ChatResponseFormat.Json };
 
-        SelectionResponseDto? parsed = null;
+        UntrustedSelection? parsed = null;
         for (var attempt = 1; attempt <= 2 && parsed is null; attempt++)
         {
-            var response = await chatClient.GetResponseAsync(messages, chatOptions, cancellationToken);
-            parsed = TryParse<SelectionResponseDto>(response.Text);
-            if (parsed is null || parsed.Index < 0 || parsed.Index >= bases.Count)
+            var response = await GetChatResponseAsync(messages, chatOptions, cancellationToken);
+            var candidate = TryParse<UntrustedSelection>(response.Text);
+            if (candidate?.Index is null ||
+                candidate.Index < 0 ||
+                candidate.Index >= bases.Count ||
+                string.IsNullOrWhiteSpace(candidate.Rationale))
             {
-                logger.LogWarning("Base selection response invalid on attempt {Attempt}/2: {Text}", attempt, response.Text);
-                parsed = null;
+                logger.LogWarning("Base selection response invalid on attempt {Attempt}/2.", attempt);
+                continue;
             }
+
+            parsed = candidate;
         }
 
-        if (parsed is null)
-            throw new InvalidOperationException("Gemini did not return a usable base selection after 2 attempts.");
+        if (parsed?.Index is not int selectedIndex || string.IsNullOrWhiteSpace(parsed.Rationale))
+            throw new TailoringOutputInvalidException("Tailoring model did not return a usable base selection after 2 attempts.");
 
-        var chosen = bases[parsed.Index];
-        return new BaseSelection(chosen.Id, chosen.Name, parsed.Rationale ?? "");
+        var chosen = bases[selectedIndex];
+        return new BaseSelection(chosen.Id, chosen.Name, parsed.Rationale.Trim());
     }
 
-    private async Task<RewriteResponseDto> RewriteAsync(
-        JobPosting posting,
-        BaseSelection selection,
-        string originalSummary,
-        IReadOnlyList<Item> originalExperience,
-        IReadOnlyList<Item> originalSkills,
-        CancellationToken cancellationToken)
+    private async Task<UntrustedRewrite> RewriteAsync(
+        JobPosting posting, BaseResumeSnapshot snapshot, CancellationToken cancellationToken)
     {
-        var experienceText = string.Join("\n", originalExperience.Select(i => $"[{i.ItemId}] {i.Text}"));
-        var skillsText = string.Join("\n", originalSkills.Select(i => $"[{i.ItemId}] {i.Text}"));
+        var experienceText = string.Join("\n", snapshot.Experience.Select(i => $"[{i.ItemId}] {i.Text}"));
+        var skillsText = string.Join("\n", snapshot.Skills.Select(i => $"[{i.ItemId}] {i.Text}"));
 
         var messages = new List<ChatMessage>
         {
@@ -155,8 +163,8 @@ public class GeminiResumeTailor(
                 Job posting:
                 {JobPostingTextNormalizer.ToEmbeddingText(posting)}
 
-                Candidate's current resume (base: {selection.BaseResumeName}):
-                Summary: {originalSummary}
+                Candidate's current resume (base: {snapshot.BaseSelection.BaseResumeName}):
+                Summary: {snapshot.Summary}
 
                 Experience:
                 {experienceText}
@@ -167,58 +175,53 @@ public class GeminiResumeTailor(
         };
         var chatOptions = new ChatOptions { ResponseFormat = ChatResponseFormat.Json };
 
-        RewriteResponseDto? parsed = null;
+        UntrustedRewrite? parsed = null;
         for (var attempt = 1; attempt <= 2 && parsed is null; attempt++)
         {
-            var response = await chatClient.GetResponseAsync(messages, chatOptions, cancellationToken);
-            parsed = TryParse<RewriteResponseDto>(response.Text);
+            var response = await GetChatResponseAsync(messages, chatOptions, cancellationToken);
+            parsed = TryParse<UntrustedRewrite>(response.Text);
             if (parsed is null)
                 logger.LogWarning("Resume rewrite response was not valid JSON on attempt {Attempt}/2.", attempt);
         }
 
         if (parsed is null)
-            throw new InvalidOperationException("Gemini did not return a usable resume rewrite after 2 attempts.");
+            throw new TailoringOutputInvalidException("Tailoring model did not return a usable resume rewrite after 2 attempts.");
 
         return parsed;
     }
 
-    private record Item(string ItemId, string Text);
+    /// <summary>
+    /// Wraps every tailoring chat call so a transport/model-level failure (auth, network,
+    /// non-2xx, timeout) surfaces as TailoringModelUnavailableException instead of a raw SDK
+    /// exception whose message may embed upstream response text. Caller cancellation is rethrown
+    /// as-is, never wrapped.
+    /// </summary>
+    private async Task<ChatResponse> GetChatResponseAsync(
+        IReadOnlyList<ChatMessage> messages, ChatOptions chatOptions, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ChatClient.GetResponseAsync(messages, chatOptions, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Tailoring chat client request failed with {ExceptionType}.", ex.GetType().Name);
+            throw new TailoringModelUnavailableException($"Tailoring chat client request failed ({ex.GetType().Name}).");
+        }
+    }
 
-    private static IReadOnlyList<Item> ExtractItems(JsonNode resume, string section, string textField)
+    private static IReadOnlyList<ResumeItemSnapshot> ExtractItems(JsonNode resume, string section, string textField)
     {
         if (resume["data"]?[section] is not JsonObject items)
             return [];
 
         return items
             .Where(kvp => kvp.Value is not null)
-            .Select(kvp => new Item(kvp.Key, kvp.Value![textField]?.GetValue<string>() ?? ""))
-            .ToList();
-    }
-
-    /// <summary>
-    /// Keeps the base's exact set of item ids (never adds or drops one - that's what "keeps
-    /// structure" means here). An id the model rewrote gets the new text; anything it left out,
-    /// or any id it invented that isn't actually in the base, is handled defensively: missing ->
-    /// original text kept, invented -> dropped with a warning.
-    /// </summary>
-    private IReadOnlyList<Item> MergeItems(
-        IReadOnlyList<Item> original, IReadOnlyList<RewriteItemDto> rewritten, string section)
-    {
-        var knownIds = original.Select(i => i.ItemId).ToHashSet();
-        var rewrittenById = new Dictionary<string, string>();
-        foreach (var item in rewritten)
-        {
-            if (!knownIds.Contains(item.ItemId))
-            {
-                logger.LogWarning("Rewrite response invented a {Section} item id {ItemId}; ignored.", section, item.ItemId);
-                continue;
-            }
-
-            rewrittenById[item.ItemId] = item.Text;
-        }
-
-        return original
-            .Select(o => new Item(o.ItemId, rewrittenById.GetValueOrDefault(o.ItemId, o.Text)))
+            .Select(kvp => new ResumeItemSnapshot(kvp.Key, kvp.Value?[textField]?.GetValue<string>() ?? ""))
             .ToList();
     }
 
@@ -248,15 +251,5 @@ public class GeminiResumeTailor(
         return firstNewline > 0 && lastFence > firstNewline
             ? text[(firstNewline + 1)..lastFence].Trim()
             : text;
-    }
-
-    private record SelectionResponseDto(int Index, string? Rationale);
-
-    private record RewriteResponseDto(
-        string Summary, List<RewriteItemDto> Experience, List<RewriteItemDto> Skills, string Rationale);
-
-    private record RewriteItemDto(string ItemId, string? Description, string? Skill)
-    {
-        public string Text => Description ?? Skill ?? "";
     }
 }

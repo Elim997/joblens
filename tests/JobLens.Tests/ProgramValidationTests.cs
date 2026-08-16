@@ -15,7 +15,11 @@ public class ProgramValidationTests
         ["JobLens:MessagesDbPath"] = "C:/dummy/messages.db",
         ["JobLens:GroupChatJids:0"] = "dummy@g.us",
         ["Postgres:ConnectionString"] = "Host=dummy;Database=dummy;Username=dummy;Password=dummy",
-        ["Gemini:ApiKey"] = "dummy-key",
+        ["Gemini:ApiKey"] = "dummy-gemini-key",
+        ["Llm:BaseUrl"] = "http://localhost:20128/v1",
+        ["Llm:ApiKey"] = "dummy-llm-key",
+        ["Llm:ScoringModel"] = "coding-fallback",
+        ["Llm:TailoringModel"] = "cc/claude-sonnet-5",
     };
 
     [Fact]
@@ -28,14 +32,22 @@ public class ProgramValidationTests
         Assert.Null(exception);
     }
 
-    [Fact]
-    public void ValidateRequiredConfig_BlankMessagesDbPath_Throws()
+    [Theory]
+    [InlineData("JobLens:MessagesDbPath", "MessagesDbPath")]
+    [InlineData("Postgres:ConnectionString", "Postgres:ConnectionString")]
+    [InlineData("Gemini:ApiKey", "Gemini:ApiKey")]
+    [InlineData("Llm:BaseUrl", "Llm:BaseUrl")]
+    [InlineData("Llm:ApiKey", "Llm:ApiKey")]
+    [InlineData("Llm:ScoringModel", "Llm:ScoringModel")]
+    [InlineData("Llm:TailoringModel", "Llm:TailoringModel")]
+    public void ValidateRequiredConfig_BlankRequiredSetting_Throws(string key, string expectedMessage)
     {
-        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent) { ["JobLens:MessagesDbPath"] = "" };
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent) { [key] = "   " };
         var config = BuildConfig(values);
 
         var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
-        Assert.Contains("MessagesDbPath", exception.Message);
+
+        Assert.Contains(expectedMessage, exception.Message);
     }
 
     [Fact]
@@ -49,23 +61,48 @@ public class ProgramValidationTests
         Assert.Contains("GroupChatJids", exception.Message);
     }
 
-    [Fact]
-    public void ValidateRequiredConfig_BlankPostgresConnectionString_Throws()
+    [Theory]
+    [InlineData("relative/path")]
+    [InlineData("ftp://localhost/v1")]
+    [InlineData("://not-a-uri")]
+    public void ValidateRequiredConfig_InvalidLlmBaseUrl_Throws(string baseUrl)
     {
-        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent) { ["Postgres:ConnectionString"] = "   " };
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent) { ["Llm:BaseUrl"] = baseUrl };
         var config = BuildConfig(values);
 
         var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
-        Assert.Contains("Postgres:ConnectionString", exception.Message);
+
+        Assert.Contains("absolute HTTP or HTTPS URI", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("coding-fallback")]
+    [InlineData(" CODING-FALLBACK ")]
+    public void ValidateRequiredConfig_TailoringUsesScoringFallback_Throws(string tailoringModel)
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            ["Llm:TailoringModel"] = tailoringModel,
+        };
+        var config = BuildConfig(values);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Contains("dedicated model", exception.Message);
     }
 
     [Fact]
-    public void ValidateRequiredConfig_BlankGeminiApiKey_Throws()
+    public void ValidateRequiredConfig_DistinctNonFallbackModels_DoesNotThrow()
     {
-        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent) { ["Gemini:ApiKey"] = "" };
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            ["Llm:ScoringModel"] = "scoring-model",
+            ["Llm:TailoringModel"] = "tailoring-model",
+        };
         var config = BuildConfig(values);
 
-        var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
-        Assert.Contains("Gemini:ApiKey", exception.Message);
+        var exception = Record.Exception(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Null(exception);
     }
 }

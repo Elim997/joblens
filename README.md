@@ -39,11 +39,61 @@ flowchart LR
 - **INotifier** sends matches above a threshold; **IResumeTailor** rewrites a
   resume for a specific match on request.
 
-Scoring and embedding go through `Microsoft.Extensions.AI`'s `IChatClient` /
-`IEmbeddingGenerator` abstractions, not a provider SDK directly. The project
-currently runs on Gemini (via its OpenAI-compatible endpoint); the only
-Gemini-specific code is two model-name strings and an endpoint URL in DI setup -
-switching providers is a config change, not a rewrite.
+Scoring, tailoring, and embedding all go through `Microsoft.Extensions.AI`
+abstractions, not a provider SDK directly - but chat and embeddings are two
+separate providers with two separate jobs:
+
+```text
+JobLens
+│
+├── Embeddings
+│   └── Gemini API
+│       └── gemini-embedding-001
+│           └── 1536 dimensions
+│
+├── Relevance scoring
+│   └── OmniRoute
+│       └── Llm:ScoringModel
+│           └── normally coding-fallback
+│
+└── Resume tailoring
+    └── OmniRoute
+        └── Llm:TailoringModel
+            └── separately pinned model
+```
+
+**Gemini is embeddings-only.** It never sees a chat/scoring/tailoring prompt.
+**OmniRoute handles all chat/reasoning** - both relevance scoring and resume
+tailoring - through two provider-neutral roles, `IScoringChatClient` and
+`ITailoringChatClient`, each wrapping its own `IChatClient` built from an
+independently configurable model ID (`Llm:ScoringModel` / `Llm:TailoringModel`).
+No unqualified `IChatClient` is registered in DI, so a future consumer can't
+accidentally pick up the wrong role's client. Tailoring must never use
+`coding-fallback` as its model - `Program.ValidateRequiredConfig` refuses to
+start if `Llm:TailoringModel` is configured equal to a `coding-fallback`
+`Llm:ScoringModel`, since a resume rewrite has a much higher cost-of-error than
+a discarded relevance score.
+
+`Llm:TailoringModel` (currently `cc/claude-sonnet-5` in local dev config) is a
+**provisional default, not a permanently pinned choice.** The representative
+comparison between `cc/claude-sonnet-5` and `no-think/cc/claude-sonnet-5` -
+which should decide the final pin based on JSON cleanliness, schema compliance,
+output quality, constraint-following, and predictable parsing - hasn't been run
+yet (it needs OmniRoute quota that wasn't available while this was written) and
+isn't required for this refactor to be correct.
+
+OmniRoute is an **external prerequisite process**, not something JobLens
+starts, stops, or manages. JobLens doesn't manage provider OAuth sessions,
+refresh Claude/Codex tokens, or implement provider-specific quota/fallback
+logic - all of that lives in OmniRoute. The *intended* fallback chain is
+`Claude -> Codex -> configured free fallback providers`, but only part of that
+is actually verified end to end: direct OmniRoute Chat Completions requests
+work, JSON-mode direct requests have worked, and direct Codex aliases have
+worked through Chat Completions despite their catalog metadata indicating the
+Responses API. The actual `coding-fallback` Claude-to-Codex transition has not
+been forced or observed, and the configured free-provider tail is unverified.
+Docs in this repo say "intended" and "observed" on purpose, not "verified end
+to end," where that distinction actually matters.
 
 ## Key technical decisions
 
@@ -119,8 +169,11 @@ signal, not noise from a single lucky run.
 ## Tech stack
 
 .NET 10 · ASP.NET Core (minimal API) · PostgreSQL + pgvector · Npgsql ·
-Microsoft.Extensions.AI · Google Gemini (via its OpenAI-compatible endpoint) ·
-Model Context Protocol (C# SDK) for the Rezi integration · xUnit
+Microsoft.Extensions.AI · Google Gemini (embeddings only, via its
+OpenAI-compatible endpoint) · OmniRoute (all chat/reasoning - relevance
+scoring and resume tailoring - an external prerequisite process JobLens never
+starts, stops, or authenticates) · Model Context Protocol (C# SDK) for the
+Rezi integration · xUnit
 
 ## Running it
 
@@ -136,10 +189,48 @@ running:
 | `POST /tailor?messageId=X&commit=false` | Previews (default) or, with `commit=true`, writes an AI-tailored resume rewrite back to Rezi for one stored posting. |
 | `POST /eval` | Runs the hand-labeled set through the real scoring pipeline and reports precision/recall/F1. |
 
-63 tests pass (xUnit; a handful of integration tests need a live Postgres/Gemini/Rezi
-connection and are excluded from the default filter). The whole loop - ingest,
-score, notify, tailor, and write back to Rezi - has been run end to end against
-real data, not just mocked.
+### `/tailor` safety contract
+
+`commit` omitted, or `commit=false`, always produces a fully validated preview
+and zero Rezi writes. `commit=true` runs, in order: (1) validate the
+configured write destination (`Rezi:ForEditResumeId`, trimmed, non-blank, not
+equal to any base resume id) *before* any tailoring model call; (2) call the
+tailoring model and get back a `ValidatedTailoredResume`; (3) re-run
+`ValidateComplete` as a defense-in-depth gate; (4) build the write payload from
+that validated result only; (5) re-run `ValidateComplete` again immediately
+before writing; (6) make exactly one `WriteResumeAsync` call. The write
+destination is configuration-controlled and never model-controlled - the model
+picks *which base resume* to draw from, never *where the rewrite gets written*.
+JobLens does not automatically retry a failed write: if the transport fails
+after the request reached Rezi, a retry could duplicate or unexpectedly
+overwrite data, so an ambiguous write failure surfaces as an error instead of
+being silently retried.
+
+| Status | Meaning |
+|---|---|
+| 404 | No stored posting for that `messageId`. |
+| 401 | Rezi authentication required (token missing/expired - see [SETUP.md](SETUP.md) step 7). |
+| 502 | Rezi upstream tool call failed, or the tailoring model returned unusable structured output. |
+| 503 | Tailoring model/provider unavailable at the transport level. |
+| 422 | Deterministic resume-tailoring validation failed (invented id, blank field, etc.) - well-formed response, unprocessable content. |
+| 500 | Unsafe or missing local write configuration (`Rezi:ForEditResumeId`) - a JobLens config bug, not an upstream failure. |
+
+None of these responses echo internal model output or the configured Rezi
+resume id back to the caller.
+
+Relevance scoring is intentionally lower-risk and fail-soft, unlike tailoring:
+an invalid structured response gets one retry, and if it's still invalid that
+batch just returns no scores rather than failing the request. Resume tailoring
+is fail-closed instead - any failure anywhere in the chain above produces zero
+writes, never a partial or best-effort one.
+
+175 tests pass (xUnit, non-live/default filter). Three integration test files -
+`EvalEndpointIntegrationTests`, `LlmRelevanceScorerIntegrationTests`, and
+`PgvectorDatastoreIntegrationTests` - need a live Postgres/Gemini/OmniRoute
+connection and are excluded from that default filter
+(`--filter "Category!=Integration"`). The whole loop - ingest, score, notify,
+tailor, and write back to Rezi - has been run end to end against real data, not
+just mocked.
 
 ## Roadmap / designed but not built
 

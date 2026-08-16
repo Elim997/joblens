@@ -19,7 +19,11 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
                     ["JobLens:MessagesDbPath"] = "C:/fake/messages.db",
                     ["JobLens:GroupChatJids:0"] = "fake@g.us",
                     ["Postgres:ConnectionString"] = "Host=fake;Database=fake;Username=fake;Password=fake",
-                    ["Gemini:ApiKey"] = "fake-key",
+                    ["Gemini:ApiKey"] = "fake-gemini-key",
+                    ["Llm:BaseUrl"] = "http://localhost:20128/v1",
+                    ["Llm:ApiKey"] = "fake-llm-key",
+                    ["Llm:ScoringModel"] = "coding-fallback",
+                    ["Llm:TailoringModel"] = "cc/claude-sonnet-5",
                 });
             });
         });

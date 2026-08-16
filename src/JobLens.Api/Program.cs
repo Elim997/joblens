@@ -2,6 +2,7 @@ using JobLens.Core.Configuration;
 using JobLens.Core.Embedding;
 using JobLens.Core.Eval;
 using JobLens.Core.Feed;
+using JobLens.Core.Llm;
 using JobLens.Core.Notification;
 using JobLens.Core.Parsing;
 using JobLens.Core.Pipeline;
@@ -22,19 +23,17 @@ var config = builder.Configuration;
 // JobLens config: MessagesDbPath + GroupChatJids come from user-secrets (identifying),
 // TargetCategories/Profile/ScoringTopK from appsettings. Injected later as IOptions<JobLensOptions>.
 builder.Services.Configure<JobLensOptions>(config.GetSection("JobLens"));
+builder.Services.Configure<LlmOptions>(config.GetSection("Llm"));
 
 // Rezi base resume IDs and the "for edit" slot ID identify this account's resumes, so like
-// GroupChatJids they live in user-secrets, never appsettings. Not validated at startup (unlike
-// Postgres/Gemini) - resume tailoring is on-demand, not on the always-on ingest/run path, so a
-// missing value fails clearly at first actual use (GeminiResumeTailor) rather than blocking /health.
+// GroupChatJids they live in user-secrets, never appsettings. They are not startup requirements:
+// resume tailoring is on-demand rather than part of the always-on ingest/run path, so missing Rezi
+// configuration fails clearly at first actual use instead of blocking /health.
 builder.Services.Configure<ReziOptions>(config.GetSection("Rezi"));
 
-// Postgres + pgvector data source, and the Gemini clients, are resolved lazily (factory
-// delegates read IConfiguration at first resolution, not here). This isn't just style:
-// a factory only runs on first actual use, which happens after builder.Build() - so
-// Program.ValidateRequiredConfig (called after Build(), see below) can catch missing
-// config with a clean error before these factories ever run, and so an integration test
-// hitting only /health never needs a real Postgres/Gemini config to begin with.
+// Postgres + pgvector, Gemini embeddings, and OmniRoute chat clients are resolved lazily
+// after startup validation. Gemini remains embedding-only; all chat requests go through
+// provider-neutral role registrations backed by the externally managed OmniRoute API.
 builder.Services.AddSingleton(sp =>
 {
     var pgConn = sp.GetRequiredService<IConfiguration>()["Postgres:ConnectionString"]
@@ -44,29 +43,45 @@ builder.Services.AddSingleton(sp =>
     return dataSourceBuilder.Build();
 });
 
-// Gemini via its OpenAI-compatible endpoint, exposed as the M.E.AI abstractions.
-builder.Services.AddSingleton(sp =>
+builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
 {
     var geminiKey = sp.GetRequiredService<IConfiguration>()["Gemini:ApiKey"]
         ?? throw new InvalidOperationException("Missing Gemini:ApiKey");
-    return new OpenAIClient(
+    var gemini = new OpenAIClient(
         new ApiKeyCredential(geminiKey),
-        new OpenAIClientOptions { Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/") });
+        new OpenAIClientOptions
+        {
+            Endpoint = new Uri("https://generativelanguage.googleapis.com/v1beta/openai/"),
+        });
+
+    return gemini.GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator();
 });
-// gemini-2.5-flash and gemini-2.5-flash-lite are deprecated (404 "no longer
-// available to new users" as of this key). gemini-flash-latest is Google's rolling
-// alias to their current flash model - confirmed working live; see CLAUDE.md.
-builder.Services.AddSingleton<IChatClient>(sp =>
-    sp.GetRequiredService<OpenAIClient>().GetChatClient("gemini-flash-latest").AsIChatClient());
-builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
-    sp.GetRequiredService<OpenAIClient>().GetEmbeddingClient("gemini-embedding-001").AsIEmbeddingGenerator());
+
+builder.Services.AddSingleton<IScoringChatClient>(sp =>
+{
+    var llm = sp.GetRequiredService<IOptions<LlmOptions>>().Value;
+    return new ScoringChatClient(CreateOmniRouteChatClient(llm, llm.ScoringModel));
+});
+builder.Services.AddSingleton<ITailoringChatClient>(sp =>
+{
+    var llm = sp.GetRequiredService<IOptions<LlmOptions>>().Value;
+    return new TailoringChatClient(CreateOmniRouteChatClient(llm, llm.TailoringModel));
+});
+
+static IChatClient CreateOmniRouteChatClient(LlmOptions options, string model)
+{
+    var client = new OpenAIClient(
+        new ApiKeyCredential(options.ApiKey),
+        new OpenAIClientOptions { Endpoint = new Uri(options.BaseUrl) });
+    return client.GetChatClient(model).AsIChatClient();
+}
 
 builder.Services.AddSingleton<IJobFeedSource, SqliteJobFeedSource>();
 builder.Services.AddSingleton<IPostingParser, WhatsAppPostingParser>();
 builder.Services.AddSingleton<IEmbedder, GeminiEmbedder>();
 builder.Services.AddSingleton<IDatastore, PgvectorDatastore>();
 builder.Services.AddSingleton<IProfileEmbeddingProvider, ProfileEmbeddingProvider>();
-builder.Services.AddSingleton<IRelevanceScorer, GeminiRelevanceScorer>();
+builder.Services.AddSingleton<IRelevanceScorer, LlmRelevanceScorer>();
 builder.Services.AddSingleton<INotifier, ConsoleNotifier>();
 builder.Services.AddSingleton<PipelineRunner>();
 builder.Services.AddSingleton<EvalHarness>();
@@ -79,7 +94,7 @@ builder.Services.AddSingleton<ITokenCache>(sp => new EncryptedFileTokenCache(
     ReziMcpConnection.DefaultTokenCachePath, sp.GetRequiredService<ILogger<EncryptedFileTokenCache>>()));
 #pragma warning restore CA1416
 builder.Services.AddSingleton<IResumeClient, RealResumeClient>();
-builder.Services.AddSingleton<IResumeTailor, GeminiResumeTailor>();
+builder.Services.AddSingleton<IResumeTailor, LlmResumeTailor>();
 builder.Services.AddSingleton<ResumeTailoringRunner>();
 
 builder.Services.AddOpenApi();
@@ -207,9 +222,9 @@ app.MapGet("/query", async (
 // writes to Rezi, and only ever to that one configured slot (see ResumeTailoringRunner).
 app.MapPost("/tailor", async (
     string messageId,
-    bool commit,
     ResumeTailoringRunner runner,
-    CancellationToken cancellationToken) =>
+    CancellationToken cancellationToken,
+    bool commit = false) => // omitted commit query param -> preview, never a write
 {
     try
     {
@@ -228,6 +243,32 @@ app.MapPost("/tailor", async (
         // ("upstream failed") beats an opaque unhandled-exception 500.
         return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
     }
+    catch (TailoringModelUnavailableException ex)
+    {
+        // The tailoring chat client itself was unreachable/failed at the transport level -
+        // "service unavailable" is more accurate than an opaque 500, and matches the intent of
+        // ReziToolCallException's 502 for the equivalent Rezi-side failure.
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+    catch (TailoringOutputInvalidException ex)
+    {
+        // The model responded but never produced parseable output after retries - an upstream
+        // (model-side) failure, not a JobLens bug, so 502 rather than 500.
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
+    }
+    catch (ResumeTailoringValidationException ex)
+    {
+        // The model's output parsed but failed validation against the base resume it claims to
+        // rewrite (invented id, blank field, etc.) - a 422 ("well-formed but unprocessable"),
+        // never a write.
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status422UnprocessableEntity);
+    }
+    catch (ResumeWriteConfigurationException ex)
+    {
+        // The write destination itself is unsafe (missing or equal to a base id) - a JobLens
+        // config bug, not an upstream failure, so 500.
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status500InternalServerError);
+    }
 });
 
 app.Run();
@@ -235,11 +276,10 @@ app.Run();
 public partial class Program
 {
     /// <summary>
-    /// Guards against a missing MessagesDbPath, GroupChatJids, Postgres connection
-    /// string, or Gemini key with a clear error instead of a cryptic failure the first
-    /// time something tries to use them. Pure function of IConfiguration so it's
-    /// directly unit-testable with in-memory config, independent of real secrets - see
-    /// ProgramValidationTests.
+    /// Guards against missing feed, Postgres, Gemini embedding, or OmniRoute chat
+    /// configuration with a clear error instead of a cryptic failure at first use. This
+    /// is a pure function of IConfiguration, so ProgramValidationTests can exercise it
+    /// hermetically with in-memory values.
     /// </summary>
     public static void ValidateRequiredConfig(IConfiguration config)
     {
@@ -251,5 +291,32 @@ public partial class Program
             throw new InvalidOperationException("Missing Postgres:ConnectionString");
         if (string.IsNullOrWhiteSpace(config["Gemini:ApiKey"]))
             throw new InvalidOperationException("Missing Gemini:ApiKey");
+
+        var llmBaseUrl = config["Llm:BaseUrl"];
+        if (string.IsNullOrWhiteSpace(llmBaseUrl))
+            throw new InvalidOperationException("Missing Llm:BaseUrl");
+        if (!Uri.TryCreate(llmBaseUrl, UriKind.Absolute, out var llmUri) ||
+            (llmUri.Scheme != Uri.UriSchemeHttp && llmUri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException("Llm:BaseUrl must be an absolute HTTP or HTTPS URI");
+        }
+
+        if (string.IsNullOrWhiteSpace(config["Llm:ApiKey"]))
+            throw new InvalidOperationException("Missing Llm:ApiKey");
+
+        var scoringModel = config["Llm:ScoringModel"];
+        if (string.IsNullOrWhiteSpace(scoringModel))
+            throw new InvalidOperationException("Missing Llm:ScoringModel");
+
+        var tailoringModel = config["Llm:TailoringModel"];
+        if (string.IsNullOrWhiteSpace(tailoringModel))
+            throw new InvalidOperationException("Missing Llm:TailoringModel");
+
+        if (string.Equals(scoringModel.Trim(), "coding-fallback", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(tailoringModel.Trim(), scoringModel.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Llm:TailoringModel must be a dedicated model, not the scoring fallback combo");
+        }
     }
 }

@@ -16,7 +16,7 @@ public record TailorResponse(
     bool Committed,
     string? WrittenToResumeId)
 {
-    public static TailorResponse From(TailoredResume tailored, bool committed, string? writtenToResumeId) => new(
+    public static TailorResponse From(ValidatedTailoredResume tailored, bool committed, string? writtenToResumeId) => new(
         tailored.BaseSelection.BaseResumeId,
         tailored.BaseSelection.BaseResumeName,
         tailored.BaseSelection.Rationale,
@@ -46,29 +46,58 @@ public class ResumeTailoringRunner(
         if (posting is null)
             return null;
 
+        // Validate the write destination before the (expensive) tailoring model call and Rezi
+        // base reads, so a misconfigured ForEditResumeId fails fast instead of after burning a
+        // model call. The model itself never sees or influences this value - it comes only from
+        // configuration, resolved here, once, before TailorAsync runs at all.
+        var forEditId = commit ? ValidateWriteDestination() : null;
+
         var tailored = await tailor.TailorAsync(posting, cancellationToken);
 
         if (!commit)
+        {
+            // Defense in depth: re-check the validator-produced result immediately before it
+            // becomes a preview response, even though TailorAsync can only ever return an
+            // already-validated result.
+            ResumeTailoringValidator.ValidateComplete(tailored);
             return TailorResponse.From(tailored, committed: false, writtenToResumeId: null);
+        }
 
-        var forEditId = options.Value.ForEditResumeId;
+        // Re-checked again immediately before building the write payload, and again immediately
+        // before the write itself - both are cheap and pure, and either one failing must produce
+        // zero calls to WriteResumeAsync.
+        ResumeTailoringValidator.ValidateComplete(tailored);
+        var payload = BuildWritePayload(tailored);
 
-        // HARD GUARDRAIL: the only ever write target is the configured "for edit" slot - never
-        // a base. This is a config-integrity check, not a tailoring-logic one: TailorAsync never
-        // produces a write target at all (it only reads bases), so the only way a base could get
-        // written is ForEditResumeId being misconfigured to equal one of the base ids.
-        if (string.IsNullOrWhiteSpace(forEditId))
-            throw new InvalidOperationException("Rezi:ForEditResumeId is not configured; refusing to write.");
-        if (options.Value.BaseResumes.Any(b => b.Id == forEditId))
-            throw new InvalidOperationException(
-                $"Rezi:ForEditResumeId ('{forEditId}') matches a configured base resume id. " +
-                "Refusing to write - a base must never be writable via /tailor.");
-
-        await resumeClient.WriteResumeAsync(forEditId, BuildWritePayload(tailored), cancellationToken);
+        ResumeTailoringValidator.ValidateComplete(tailored);
+        await resumeClient.WriteResumeAsync(forEditId!, payload, cancellationToken);
         return TailorResponse.From(tailored, committed: true, writtenToResumeId: forEditId);
     }
 
-    private static JsonNode BuildWritePayload(TailoredResume tailored)
+    /// <summary>
+    /// HARD GUARDRAIL: the only ever write target is the configured "for edit" slot - never a
+    /// base, and never anything the tailoring model can influence (TailorAsync only ever reads
+    /// bases; it never produces a write target). Trims the configured id and compares it against
+    /// every configured base resume id ordinally, ignoring case, so a base can never become
+    /// writable via /tailor through a config typo or case mismatch either.
+    /// </summary>
+    private string ValidateWriteDestination()
+    {
+        var forEditId = options.Value.ForEditResumeId?.Trim() ?? "";
+        if (forEditId.Length == 0)
+            throw new ResumeWriteConfigurationException("Rezi:ForEditResumeId is not configured; refusing to write.");
+
+        var matchesBaseId = options.Value.BaseResumes.Any(b =>
+            string.Equals(b.Id?.Trim(), forEditId, StringComparison.OrdinalIgnoreCase));
+        if (matchesBaseId)
+            throw new ResumeWriteConfigurationException(
+                "Rezi:ForEditResumeId matches a configured base resume id. Refusing to write - " +
+                "a base must never be writable via /tailor.");
+
+        return forEditId;
+    }
+
+    private static JsonNode BuildWritePayload(ValidatedTailoredResume tailored)
     {
         var experience = new JsonObject();
         foreach (var item in tailored.Experience)

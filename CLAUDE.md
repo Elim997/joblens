@@ -32,23 +32,31 @@ legitimately demonstrates both.
 ## Stack (pinned, do not substitute without asking)
 
 - Runtime: ASP.NET Core minimal API or worker service on .NET 10.
-- LLM + embeddings provider: Google Gemini on the free tier, via its
+- Embeddings provider: Google Gemini on the free tier, via its
   OpenAI-compatible endpoint, consumed with the OpenAI .NET SDK and exposed
-  through Microsoft.Extensions.AI `IChatClient` and `IEmbeddingGenerator`.
-  Endpoint: https://generativelanguage.googleapis.com/v1beta/openai/ . Auth is
-  your Google AI Studio key sent as a Bearer token. One key covers both chat
-  and embeddings, so there is no separate embeddings provider.
-  - Chat / scoring / parse-fallback model: `gemini-flash-latest` (free tier).
-    `gemini-2.5-flash` and `gemini-2.5-flash-lite` are deprecated - both 404
-    "no longer available to new users" as of 2026-08. `gemini-flash-latest`
-    is Google's rolling alias to their current flash model: no version to go
-    stale, but the model behind it can change without notice. Re-verify with
-    a direct curl to `.../v1beta/openai/models` if chat calls start 404ing.
-  - Embeddings model: `gemini-embedding-001`.
-  - Provider-agnostic on purpose: every model call goes through IChatClient or
-    IEmbeddingGenerator, so switching to Claude or OpenAI later is a DI/config
-    change, not a rewrite. Gemini is named only in the DI registration.
+  through Microsoft.Extensions.AI `IEmbeddingGenerator`. Endpoint:
+  https://generativelanguage.googleapis.com/v1beta/openai/ . Auth is your
+  Google AI Studio key sent as a Bearer token. **Gemini is embeddings-only** -
+  it never sees a chat/scoring/tailoring prompt.
+  - Embeddings model: `gemini-embedding-001`, 1536 dimensions.
   - Caveat: Google may train on free-tier prompts. Fine for public job posts.
+- Chat/reasoning provider: **OmniRoute**, an external prerequisite process
+  (not part of this repo) reachable at `Llm:BaseUrl`. All relevance scoring
+  and resume tailoring go through it via two provider-neutral roles,
+  `IScoringChatClient` (model = `Llm:ScoringModel`, normally `coding-fallback`)
+  and `ITailoringChatClient` (model = `Llm:TailoringModel`, a separately
+  pinned model - never `coding-fallback`; `Program.ValidateRequiredConfig`
+  refuses to start otherwise). No unqualified `IChatClient` is registered in
+  DI. JobLens does not start, stop, or manage OmniRoute's process, manage the
+  provider OAuth sessions (Claude/Codex) behind it, or implement any
+  provider-specific quota/fallback logic - all of that is OmniRoute's job.
+  See README.md's provider-architecture section for exactly what's verified
+  end to end vs. still intended-only about OmniRoute's fallback chain, and
+  for `Llm:TailoringModel`'s current provisional-default status.
+  - Provider-agnostic on purpose: every chat/reasoning call goes through
+    `IScoringChatClient`/`ITailoringChatClient`, and every embedding call
+    through `IEmbeddingGenerator`, so swapping either provider is a DI/config
+    change, not a rewrite.
 - Vector store: PostgreSQL + pgvector (Pgvector NuGet + Npgsql).
 - Message source: a separate WhatsApp Web bridge process (unofficial, see
   above), READ-ONLY. The pipeline reads its local SQLite message store and never
@@ -137,9 +145,11 @@ unfinished.
 - C# strings use double quotes. For a literal quote use `\"` or a verbatim
   string (`@"..."`).
 - Idiomatic .NET: DI, async/await, nullable reference types on.
-- Secrets (the Gemini API key, the WhatsApp session and bridge token) live in
-  env, user-secrets, or gitignored config. NEVER commit them. The group
-  chat_jids, messages.db path, and target-category list are config, not source.
+- Secrets (the Gemini API key, the OmniRoute API key, the WhatsApp session and
+  bridge token) live in env, user-secrets, or gitignored config. NEVER commit
+  them - an OmniRoute key is still a real secret even though OmniRoute
+  currently runs on localhost. The group chat_jids, messages.db path, and
+  target-category list are config, not source.
 - Prefer clear over clever. Someone will read this in an interview.
 
 ## Commands (fill in as they stabilize)

@@ -25,4 +25,13 @@
     <None Include="Eval\labeled-postings.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets JobLens.Tests construct/inspect the internal tailoring-validation types directly
+         (ResumeTailoringValidator, its untrusted DTOs, BaseResumeSnapshot, and
+         ValidatedTailoredResume's internal constructor) without making them part of JobLens.Core's
+         public API. Construction of ValidatedTailoredResume stays effectively validator-controlled:
+         the only other assembly that can see the internal constructor is the test assembly. -->
+    <InternalsVisibleTo Include="JobLens.Tests" />
+  </ItemGroup>
+
 </Project>

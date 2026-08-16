@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 
 namespace JobLens.Tests.Resume;
 
-public class GeminiResumeTailorTests
+public class LlmResumeTailorTests
 {
     private const string QaBaseId = "qa-base-id";
     private const string BackendBaseId = "backend-base-id";
@@ -61,6 +61,9 @@ public class GeminiResumeTailorTests
         ForEditResumeId = "for-edit-id",
     });
 
+    private static LlmResumeTailor CreateTailor(FakeResumeClient resumeClient, FakeChatClient chatClient) =>
+        new(resumeClient, new JobLens.Core.Llm.TailoringChatClient(chatClient), CreateOptions(), NullLogger<LlmResumeTailor>.Instance);
+
     [Fact]
     public async Task TailorAsync_QaJobPosting_SelectsQaBase()
     {
@@ -77,7 +80,7 @@ public class GeminiResumeTailorTests
               "rationale": "Emphasized automation testing depth relevant to the posting."
             }
             """);
-        var tailor = new GeminiResumeTailor(resumeClient, chatClient, CreateOptions(), NullLogger<GeminiResumeTailor>.Instance);
+        var tailor = CreateTailor(resumeClient, chatClient);
 
         var posting = MakePosting("QA Automation Engineer", "- Selenium\n- Playwright\n- 1+ years automation experience");
         var result = await tailor.TailorAsync(posting);
@@ -101,7 +104,7 @@ public class GeminiResumeTailorTests
               "rationale": "Rewrote to emphasize QA fit."
             }
             """);
-        var tailor = new GeminiResumeTailor(resumeClient, chatClient, CreateOptions(), NullLogger<GeminiResumeTailor>.Instance);
+        var tailor = CreateTailor(resumeClient, chatClient);
 
         var result = await tailor.TailorAsync(MakePosting("QA Engineer", "QA role"));
 
@@ -112,6 +115,9 @@ public class GeminiResumeTailorTests
         Assert.Single(result.Skills);
         Assert.Equal("sk1", result.Skills[0].ItemId);
         Assert.Equal("Rewritten skill line.", result.Skills[0].Skill);
+
+        Assert.Equal(["exp1"], result.OriginalExperienceIds);
+        Assert.Equal(["sk1"], result.OriginalSkillIds);
     }
 
     [Fact]
@@ -122,7 +128,7 @@ public class GeminiResumeTailorTests
             """{"index": 0, "rationale": "QA fit"}""",
             // Rewrite response omits both experience and skills entirely.
             """{"summary": "New summary only.", "experience": [], "skills": [], "rationale": "Only the summary needed changing."}""");
-        var tailor = new GeminiResumeTailor(resumeClient, chatClient, CreateOptions(), NullLogger<GeminiResumeTailor>.Instance);
+        var tailor = CreateTailor(resumeClient, chatClient);
 
         var result = await tailor.TailorAsync(MakePosting("QA Engineer", "QA role"));
 
@@ -131,7 +137,7 @@ public class GeminiResumeTailorTests
     }
 
     [Fact]
-    public async Task TailorAsync_RewriteInventsUnknownItemId_DropsItRatherThanApplyingIt()
+    public async Task TailorAsync_RewriteInventsUnknownItemId_ThrowsValidationException()
     {
         var resumeClient = CreateSeededResumeClient();
         var chatClient = new FakeChatClient(
@@ -139,18 +145,15 @@ public class GeminiResumeTailorTests
             """
             {
               "summary": "New summary.",
-              "experience": [{"itemId": "exp1", "description": "Real edit."}, {"itemId": "made-up-id", "description": "Should be dropped."}],
+              "experience": [{"itemId": "exp1", "description": "Real edit."}, {"itemId": "made-up-id", "description": "Should not be accepted."}],
               "skills": [],
               "rationale": "..."
             }
             """);
-        var tailor = new GeminiResumeTailor(resumeClient, chatClient, CreateOptions(), NullLogger<GeminiResumeTailor>.Instance);
+        var tailor = CreateTailor(resumeClient, chatClient);
 
-        var result = await tailor.TailorAsync(MakePosting("QA Engineer", "QA role"));
-
-        Assert.Single(result.Experience); // still just exp1 - the invented id never made it into the result
-        Assert.Equal("exp1", result.Experience[0].ItemId);
-        Assert.Equal("Real edit.", result.Experience[0].Description);
+        await Assert.ThrowsAsync<ResumeTailoringValidationException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role")));
     }
 
     [Fact]
@@ -160,10 +163,132 @@ public class GeminiResumeTailorTests
         var chatClient = new FakeChatClient(
             """{"index": 1, "rationale": "Backend fit"}""",
             """{"summary": "s", "experience": [], "skills": [], "rationale": "r"}""");
-        var tailor = new GeminiResumeTailor(resumeClient, chatClient, CreateOptions(), NullLogger<GeminiResumeTailor>.Instance);
+        var tailor = CreateTailor(resumeClient, chatClient);
 
         await tailor.TailorAsync(MakePosting("Backend Engineer", "C#/.NET role"));
 
         Assert.Empty(resumeClient.Writes);
+    }
+
+    [Fact]
+    public async Task TailorAsync_ChatClientThrowsOnSelection_ThrowsModelUnavailable()
+    {
+        var resumeClient = CreateSeededResumeClient();
+        var chatClient = new FakeChatClient(new HttpRequestException("upstream 500, secret-token=abc123"));
+        var tailor = CreateTailor(resumeClient, chatClient);
+
+        var ex = await Assert.ThrowsAsync<TailoringModelUnavailableException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role")));
+
+        // The transport exception's message (which may contain upstream response text or secrets)
+        // must never leak into the wrapped exception - only the exception type name may appear.
+        Assert.DoesNotContain("secret-token", ex.Message);
+        Assert.Contains("HttpRequestException", ex.Message);
+    }
+
+    [Fact]
+    public async Task TailorAsync_ChatClientThrowsOnRewrite_ThrowsModelUnavailable()
+    {
+        var resumeClient = CreateSeededResumeClient();
+        var chatClient = new FakeChatClient(
+            """{"index": 0, "rationale": "QA fit"}""",
+            new InvalidOperationException("auth header leaked here"));
+        var tailor = CreateTailor(resumeClient, chatClient);
+
+        var ex = await Assert.ThrowsAsync<TailoringModelUnavailableException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role")));
+
+        Assert.DoesNotContain("auth header", ex.Message);
+    }
+
+    [Fact]
+    public async Task TailorAsync_SelectionResponseNeverParses_ThrowsOutputInvalidAfterRetries()
+    {
+        var resumeClient = CreateSeededResumeClient();
+        var chatClient = new FakeChatClient("not json at all", "still not json");
+        var tailor = CreateTailor(resumeClient, chatClient);
+
+        await Assert.ThrowsAsync<TailoringOutputInvalidException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role")));
+
+        Assert.Equal(2, chatClient.CallCount);
+    }
+
+    [Fact]
+    public async Task TailorAsync_RewriteResponseNeverParses_ThrowsOutputInvalidAfterRetries()
+    {
+        var resumeClient = CreateSeededResumeClient();
+        var chatClient = new FakeChatClient(
+            """{"index": 0, "rationale": "QA fit"}""",
+            "not json at all",
+            "still not json");
+        var tailor = CreateTailor(resumeClient, chatClient);
+
+        await Assert.ThrowsAsync<TailoringOutputInvalidException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role")));
+
+        Assert.Equal(3, chatClient.CallCount);
+    }
+
+    [Theory]
+    [InlineData("""{"index": 0}""")]
+    [InlineData("""{"index": 0, "rationale": null}""")]
+    [InlineData("""{"index": 0, "rationale": "   "}""")]
+    public async Task TailorAsync_SelectionRationaleMissingOrBlank_ThrowsOutputInvalidAfterRetries(
+        string response)
+    {
+        var resumeClient = CreateSeededResumeClient();
+        var chatClient = new FakeChatClient(response, response);
+        var tailor = CreateTailor(resumeClient, chatClient);
+
+        await Assert.ThrowsAsync<TailoringOutputInvalidException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role")));
+
+        Assert.Equal(2, chatClient.CallCount);
+    }
+
+    [Fact]
+    public async Task TailorAsync_RewriteRationaleMissing_ThrowsValidationException()
+    {
+        var resumeClient = CreateSeededResumeClient();
+        var chatClient = new FakeChatClient(
+            """{"index": 0, "rationale": "QA fit"}""",
+            """{"summary": "summary", "experience": [], "skills": []}""");
+        var tailor = CreateTailor(resumeClient, chatClient);
+
+        await Assert.ThrowsAsync<ResumeTailoringValidationException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role")));
+    }
+
+    [Fact]
+    public async Task TailorAsync_WrongJsonFieldType_NeverCreatesValidatedResult()
+    {
+        var resumeClient = CreateSeededResumeClient();
+        var chatClient = new FakeChatClient(
+            """{"index": 0, "rationale": "QA fit"}""",
+            """{"summary": 42, "experience": [], "skills": [], "rationale": "why"}""",
+            """{"summary": 42, "experience": [], "skills": [], "rationale": "why"}""");
+        var tailor = CreateTailor(resumeClient, chatClient);
+
+        await Assert.ThrowsAsync<TailoringOutputInvalidException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role")));
+
+        Assert.Equal(3, chatClient.CallCount);
+    }
+
+    [Fact]
+    public async Task TailorAsync_CancellationRequested_PropagatesAsOperationCanceled()
+    {
+        var resumeClient = CreateSeededResumeClient();
+        var chatClient = new FakeChatClient(
+            """{"index": 0, "rationale": "QA fit"}""",
+            """{"summary": "s", "experience": [], "skills": [], "rationale": "r"}""");
+        var tailor = CreateTailor(resumeClient, chatClient);
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => tailor.TailorAsync(MakePosting("QA Engineer", "QA role"), cts.Token));
     }
 }
