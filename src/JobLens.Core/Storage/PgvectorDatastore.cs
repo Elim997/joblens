@@ -208,7 +208,7 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT title, company, location, category, apply_url, description, score, reasoning
+            SELECT message_id, title, company, location, category, apply_url, description, score, reasoning
             FROM job_postings
             WHERE score >= @matchThreshold
             ORDER BY score DESC;
@@ -219,14 +219,15 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var messageId = reader.GetString(0);
             var posting = new JobPosting(
-                Title: reader.GetString(0),
-                Company: reader.GetString(1),
-                Location: reader.GetString(2),
-                Category: reader.GetString(3),
-                ApplyUrl: reader.GetString(4),
-                Description: reader.GetString(5));
-            results.Add(new StoredMatch(posting, reader.GetInt32(6), reader.GetString(7)));
+                Title: reader.GetString(1),
+                Company: reader.GetString(2),
+                Location: reader.GetString(3),
+                Category: reader.GetString(4),
+                ApplyUrl: reader.GetString(5),
+                Description: reader.GetString(6));
+            results.Add(new StoredMatch(messageId, posting, reader.GetInt32(7), reader.GetString(8)));
         }
 
         // The feed sometimes reposts the same job under a different message_id; collapse

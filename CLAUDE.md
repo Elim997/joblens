@@ -70,7 +70,8 @@ legitimately demonstrates both.
   pipeline), skipping media-only rows. WhatsApp now, Telegram later.
 - `IPostingParser`: raw message -> structured `JobPosting` (title, category,
   location, seniority, stack, link). The feed uses a fixed format with a Category
-  field, so this is mostly deterministic with an LLM fallback.
+  field, so this is parsed deterministically; messages that fail the fixed-layout
+  structure check are skipped.
 - category pre-filter: drop postings whose Category is not in my target set.
   Cheap, no LLM, runs before anything expensive.
 - `IEmbedder` + `IDatastore`: embed surviving postings, upsert into pgvector.
@@ -87,9 +88,9 @@ The semantic archive query reuses IEmbedder + IDatastore.
 
 Bridge SQLite has `chats` and `messages` tables. The `messages` columns that
 matter: `chat_jid`, `sender`, `content`, `timestamp`, `is_from_me`, `media_type`.
-`JobLens:GroupChatJids` (user-secrets, identifying) is a list of chat_jids -
-one job group is `120363427094606388@g.us`; more can be added to feed the
-same pipeline. The SQLite query filters `WHERE chat_jid IN (...)`.
+`JobLens:GroupChatJids` (user-secrets, identifying) is a list of chat_jids;
+the actual values stay in local configuration, and more groups can feed the same
+pipeline. The SQLite query filters `WHERE chat_jid IN (...)`.
 
 Filter by `chat_jid`, NOT by sender. In the real data ~650 posts share one sender
 id (the group's own number), so sender does not separate jobs from promos. Skip
@@ -97,14 +98,16 @@ rows where `content` is empty or `media_type` is set (image-only promo flyers an
 job images, no parseable text). Job vs promo is decided by the content structure
 check below, not by who sent it.
 
-Job-bot posts follow a fixed layout, so parse deterministically first and fall
-back to the LLM only when the structure check fails:
+Job-bot posts follow a fixed layout, so parse deterministically. Messages that
+fail the structure check are skipped rather than sent to an LLM:
 
 - Bold line 1: `*Title* [optional ref number] / Company`. Title is wrapped in
   WhatsApp `*` bold markup; strip the asterisks, then split on " / ".
-- Italic line 2: `Location | Category`. Split on " | ". Category drives the
-  pre-filter (seen: Software, QA; off-target values like Hardware, Research
-  exist and should be dropped).
+- Near the top of the message: italic `Location | Category`. It is normally line
+  2, but recurring bot variants insert one bold label or two plain metadata lines
+  first, so inspect only lines 2–4 for this exact italic structure. Split on
+  " | ". Category drives the pre-filter (seen: Software, QA; off-target values
+  like Hardware, Research exist and should be dropped).
 - Requirement bullet lines follow.
 - Apply URL: the first link that is NOT a `referally.*` link (e.g. a company
   careers page or linkedin.com/jobs).

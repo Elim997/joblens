@@ -48,8 +48,24 @@ public partial class WhatsAppPostingParser : IPostingParser
         if (company.Length == 0)
             return null;
 
-        var locationCategoryMatch = LocationCategoryLineRegex().Match(lines[1]);
-        if (!locationCategoryMatch.Success)
+        // The archive contains recurring job-bot variants with one bold label, or
+        // two plain metadata lines, between the title and Location | Category.
+        // Search only the small header region; a later pipe-delimited body line is
+        // not trusted as posting metadata.
+        var locationCategoryIndex = -1;
+        Match? locationCategoryMatch = null;
+        for (var index = 1; index < Math.Min(lines.Count, 4); index++)
+        {
+            var match = LocationCategoryLineRegex().Match(lines[index]);
+            if (!match.Success)
+                continue;
+
+            locationCategoryIndex = index;
+            locationCategoryMatch = match;
+            break;
+        }
+
+        if (locationCategoryMatch is null)
             return null;
 
         var location = locationCategoryMatch.Groups["location"].Value.Trim();
@@ -59,7 +75,7 @@ public partial class WhatsAppPostingParser : IPostingParser
         // like "*Book a prep session with Nicole*...") is sometimes appended after a
         // real posting. Truncate at the first such line - nothing from it or after it
         // belongs to the description or apply URL.
-        var bodyLines = lines.Skip(2).ToList();
+        var bodyLines = lines.Skip(locationCategoryIndex + 1).ToList();
         var adBlockStart = bodyLines.FindIndex(IsAdBlockStart);
         if (adBlockStart >= 0)
             bodyLines = bodyLines[..adBlockStart];

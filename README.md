@@ -29,8 +29,9 @@ flowchart LR
   store, filtered to specific group chat IDs. Source-agnostic by design - a
   Telegram implementation would sit behind the same interface.
 - **IPostingParser** turns a raw message into a structured job posting
-  (title/company/location/category/description), mostly deterministic parsing of
-  a fixed feed format, with an LLM fallback for anything that doesn't match.
+  (title/company/location/category/description) with a deterministic parser for
+  the fixed job-bot formats, including known short header variants; messages that
+  do not match those structures are skipped.
 - **category filter** drops off-target postings before anything expensive runs.
 - **IEmbedder** + pgvector embed and store surviving postings for semantic search
   and as the scorer's cheap first pass.
@@ -166,6 +167,12 @@ either side of that (observed range during testing: recall 0.38-0.63) - but the
 roughly 3.5x recall improvement from these two changes is the real, repeatable
 signal, not noise from a single lucky run.
 
+On **2026-08-16**, the same 20-item eval was re-run after chat/reasoning moved to
+OmniRoute (Gemini remained embeddings-only): **precision 1.0, recall 0.50, F1
+0.67** (4 true positives, 0 false positives, 4 false negatives, 12 true
+negatives). That is within the previously observed recall range and confirms the
+current OmniRoute-routed scoring path, not OmniRoute's upstream fallback chain.
+
 ## Tech stack
 
 .NET 10 · ASP.NET Core (minimal API) · PostgreSQL + pgvector · Npgsql ·
@@ -184,7 +191,7 @@ running:
 |---|---|
 | `POST /ingest` | Pulls new WhatsApp messages, parses, category-filters, embeds, and stores them in pgvector. |
 | `POST /run` | Scores every unscored posting in the archive against the profile and notifies matches. |
-| `GET /matches` | Stored matches (score at or above threshold) from past runs. |
+| `GET /matches` | Stored matches (including `messageId`, score, and reasoning) from past runs; pass that id to preview `/tailor`. |
 | `GET /query?text=...` | Semantic search over the embedded posting archive. |
 | `POST /tailor?messageId=X&commit=false` | Previews (default) or, with `commit=true`, writes an AI-tailored resume rewrite back to Rezi for one stored posting. |
 | `POST /eval` | Runs the hand-labeled set through the real scoring pipeline and reports precision/recall/F1. |

@@ -5,7 +5,7 @@ namespace JobLens.Tests.Parsing;
 
 public class WhatsAppPostingParserTests
 {
-    private const string ChatJid = "120363427094606388@g.us";
+    private const string ChatJid = "test-group@g.us";
 
     // Real captured content from the group (LEFT-TO-RIGHT MARK U+200E kept as-is),
     // including the "Join our community" referally.link boilerplate block that a
@@ -36,8 +36,25 @@ public class WhatsAppPostingParserTests
         "‎*Book a prep session with Nicole* - ex-Google recruiter, now a hiring " +
         "interviewer helping candidates land offers >>";
 
+    // Synthetic equivalents of recurring structures observed in the local archive;
+    // real message text and identifiers stay out of the repository.
+    private const string RealJobContentWithBoldHeaderLabel =
+        "*QA Automation Engineer* / ExampleCo\n" +
+        "*New opening*\n" +
+        "_Tel Aviv_ | _QA_\n" +
+        "- Experience with automated testing\n" +
+        "https://example.com/jobs/qa-automation";
+
+    private const string RealJobContentWithPlainHeaderMetadata =
+        "*Junior Backend Developer* / ExampleCo\n" +
+        "New opening\n" +
+        "Reference 1234\n" +
+        "_Haifa_ | _Software_\n" +
+        "- Experience with C# and .NET\n" +
+        "https://example.com/jobs/backend";
+
     private static RawMessage Raw(string id, string content) =>
-        new(id, ChatJid, "120363427094606388", content, DateTimeOffset.Parse("2026-08-09T12:00:00+03:00"));
+        new(id, ChatJid, "test-sender", content, DateTimeOffset.Parse("2026-08-09T12:00:00+03:00"));
 
     [Fact]
     public void Parse_RealJobPost_ExtractsFieldsAndStripsBoilerplateWithoutDroppingMessage()
@@ -88,6 +105,44 @@ public class WhatsAppPostingParserTests
         Assert.DoesNotContain("Nicole", posting.Description);
         Assert.DoesNotContain("prep session", posting.Description);
         Assert.DoesNotContain("hiring interviewer", posting.Description);
+    }
+
+    [Theory]
+    [InlineData("job-bold-header", RealJobContentWithBoldHeaderLabel, "QA Automation Engineer", "QA")]
+    [InlineData("job-plain-header", RealJobContentWithPlainHeaderMetadata, "Junior Backend Developer", "Software")]
+    public void Parse_RealJobPost_HeaderMetadataBeforeLocationCategory_ExtractsFields(
+        string id,
+        string content,
+        string expectedTitle,
+        string expectedCategory)
+    {
+        var parser = new WhatsAppPostingParser();
+
+        var posting = parser.Parse(Raw(id, content));
+
+        Assert.NotNull(posting);
+        Assert.Equal(expectedTitle, posting!.Title);
+        Assert.Equal(expectedCategory, posting.Category);
+        Assert.DoesNotContain("New opening", posting.Description);
+        Assert.DoesNotContain("Reference 1234", posting.Description);
+    }
+
+    [Fact]
+    public void Parse_LocationCategoryAfterTrustedHeaderRegion_ReturnsNull()
+    {
+        var content =
+            "*Backend Developer* / ExampleCo\n" +
+            "Header one\n" +
+            "Header two\n" +
+            "Header three\n" +
+            "_Tel Aviv_ | _Software_\n" +
+            "- Experience with C# and .NET\n" +
+            "https://example.com/jobs/backend";
+        var parser = new WhatsAppPostingParser();
+
+        var posting = parser.Parse(Raw("job-late-location", content));
+
+        Assert.Null(posting);
     }
 
     [Fact]

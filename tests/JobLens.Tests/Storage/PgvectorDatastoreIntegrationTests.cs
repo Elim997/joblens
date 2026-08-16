@@ -161,6 +161,7 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
         Assert.True(matchIds.IndexOf(highPosting.ApplyUrl) < matchIds.IndexOf(lowPosting.ApplyUrl));
 
         var highMatch = matches.Single(m => m.Posting.ApplyUrl == highPosting.ApplyUrl);
+        Assert.Equal(highId, highMatch.MessageId);
         Assert.Equal(95, highMatch.Score);
         Assert.Equal("Great fit", highMatch.Reasoning);
     }
@@ -195,6 +196,7 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
 
         var duplicateMatches = matches.Where(m => m.Posting.ApplyUrl == applyUrl).ToList();
         var onlyMatch = Assert.Single(duplicateMatches);
+        Assert.Equal(higherId, onlyMatch.MessageId);
         Assert.Equal(95, onlyMatch.Score);
         Assert.Equal("Acme", onlyMatch.Posting.Company);
     }

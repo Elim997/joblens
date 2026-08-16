@@ -8,7 +8,7 @@ public record UnscoredPosting(string MessageId, JobPosting Posting, float[] Embe
 
 public record ScoredMark(string MessageId, int Score, string Reasoning);
 
-public record StoredMatch(JobPosting Posting, int Score, string Reasoning);
+public record StoredMatch(string MessageId, JobPosting Posting, int Score, string Reasoning);
 
 public interface IDatastore
 {
