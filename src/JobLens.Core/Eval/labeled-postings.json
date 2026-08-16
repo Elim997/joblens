@@ -9,7 +9,7 @@
       "category": "Software",
       "applyUrl": "https://careers.stratasys.com/job/Rehovot-Software-Embedded-Developer/1392085100/",
       "description": "- Graduating BSc in Computer Engineering or Computer Science by the end of this academic year\n- Good knowledge of C programming language\n- Good knowledge of Object-Oriented programming and one of the following languages: C#, C++, or Java",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB09EC24FAF01E4B4803F",
@@ -159,7 +159,7 @@
       "category": "Machine Learning/AI",
       "applyUrl": "https://jeen.ai/career/junior-ai-solutions-engineer/",
       "description": "- Degree in Industrial Engineering or Information Systems Engineering\n- Coding abilities",
-      "isRelevant": true
+      "isRelevant": false
     },
     {
       "messageId": "3EB0AF231A4FA5888135F2",
