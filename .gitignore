@@ -9,3 +9,4 @@ scripts/.run/
 !.env.example
 node_modules/
 .claude/
+.serena/
