@@ -170,9 +170,11 @@ app.MapPost("/ingest", async (
 });
 
 // The real "score my whole archive" loop: ranks every unscored posting in pgvector
-// against the profile (not just a fresh /ingest batch), scores the top ScoringTopK,
-// notifies matches at/above MatchThreshold, and marks exactly what got scored so a
-// later run never re-scores or re-notifies it.
+// against the profile (not just a fresh /ingest batch), scores it in bounded
+// ScoringTopK batches - looping until the backlog is drained or a batch returns zero
+// usable scores - notifies matches at/above MatchThreshold (deduped across the whole
+// run, not just per batch), and marks exactly what got scored so a later run never
+// re-scores or re-notifies it.
 app.MapPost("/run", async (PipelineRunner runner, CancellationToken cancellationToken) =>
 {
     var summary = await runner.RunAsync(cancellationToken);

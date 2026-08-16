@@ -12,10 +12,15 @@ public static class NearDuplicateCollapser
     /// <summary>
     /// Keeps the first occurrence of each duplicate key and drops the rest, so callers
     /// that pass already-ranked input (e.g. scored-descending) keep the best-ranked copy.
+    /// Pass an external <paramref name="seenKeys"/> (created with
+    /// StringComparer.OrdinalIgnoreCase) to dedupe across multiple calls - e.g. across
+    /// every batch of one multi-batch /run - instead of only within this call's items;
+    /// omit it for the original single-call behavior.
     /// </summary>
-    public static IReadOnlyList<T> Collapse<T>(IReadOnlyList<T> items, Func<T, JobPosting> postingSelector)
+    public static IReadOnlyList<T> Collapse<T>(
+        IReadOnlyList<T> items, Func<T, JobPosting> postingSelector, HashSet<string>? seenKeys = null)
     {
-        var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        seenKeys ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<T>();
         foreach (var item in items)
         {

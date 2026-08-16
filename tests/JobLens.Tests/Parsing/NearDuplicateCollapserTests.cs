@@ -71,4 +71,25 @@ public class NearDuplicateCollapserTests
 
         Assert.Empty(result);
     }
+
+    [Fact]
+    public void Collapse_ExternalSeenKeys_DedupesAcrossSeparateCalls()
+    {
+        // Simulates PipelineRunner's multi-batch /run: the same job's duplicate shows up
+        // in a later, separate Collapse call - an externally-owned seenKeys set must still
+        // catch it, not just duplicates within a single call's items.
+        var first = MakePosting("Backend Engineer", "Acme", "https://example.com/job/123");
+        var second = MakePosting("Backend Engineer", "Acme Inc.", "https://example.com/job/123");
+        var unrelated = MakePosting("QA Engineer", "Beta", "https://example.com/job/456");
+
+        var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var firstCallResult = NearDuplicateCollapser.Collapse([first], p => p, seenKeys);
+        var secondCallResult = NearDuplicateCollapser.Collapse([second, unrelated], p => p, seenKeys);
+
+        Assert.Equal([first], firstCallResult);
+        // second is dropped as a duplicate of first even though it never appeared in the
+        // same call; unrelated survives since its key wasn't seen before.
+        Assert.Equal([unrelated], secondCallResult);
+    }
 }
