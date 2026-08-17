@@ -3,10 +3,10 @@ using JobLens.Core.Storage;
 
 namespace JobLens.Tests.Pipeline;
 
-// In-memory IDatastore for PipelineRunner tests. Only GetUnscoredPostingsAsync and
-// MarkScoredAsync carry real behavior (stateful across calls, so the run-twice dedupe
-// test can prove a second RunAsync sees nothing left); the rest aren't used by
-// PipelineRunner and throw if they ever are.
+// In-memory IDatastore for PipelineRunner tests, also reused by TailoredDraftService/endpoint
+// tests. GetUnscoredPostingsAsync/MarkScoredAsync (stateful across calls, so the run-twice
+// dedupe test can prove a second RunAsync sees nothing left) and GetScoredPostingByMessageIdAsync
+// carry real behavior; the rest aren't used by either caller and throw if they ever are.
 public class FakeDatastore : IDatastore
 {
     private record Row(
@@ -22,6 +22,22 @@ public class FakeDatastore : IDatastore
 
     public void Seed(string messageId, JobPosting posting, float[] embedding) =>
         _rows.Add(new Row(messageId, posting, embedding, null, null, null, null));
+
+    public void SeedScored(
+        string messageId,
+        JobPosting posting,
+        float[] embedding,
+        int? score,
+        string? reasoning,
+        string? templateName) =>
+        _rows.Add(new Row(
+            messageId,
+            posting,
+            embedding,
+            DateTimeOffset.UtcNow,
+            score,
+            reasoning,
+            templateName));
 
     public IReadOnlyList<string> ScoredMessageIds => _rows.Where(r => r.ScoredAt is not null).Select(r => r.MessageId).ToList();
 
@@ -40,8 +56,11 @@ public class FakeDatastore : IDatastore
     public Task UpsertAsync(string messageId, JobPosting posting, float[] embedding, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("Not used by PipelineRunner.");
 
-    public Task<JobPosting?> GetPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default) =>
-        Task.FromResult(_rows.FirstOrDefault(r => r.MessageId == messageId)?.Posting);
+    public Task<ScoredPostingSnapshot?> GetScoredPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default)
+    {
+        var row = _rows.FirstOrDefault(r => r.MessageId == messageId);
+        return Task.FromResult(row is null ? null : new ScoredPostingSnapshot(row.Posting, row.Score, row.Reasoning, row.TemplateName));
+    }
 
     public Task<IReadOnlyList<SimilarPosting>> QuerySimilarAsync(float[] queryEmbedding, int topK, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("Not used by PipelineRunner.");

@@ -11,9 +11,14 @@ namespace JobLens.Tests.Resume;
 public class FakeResumeClient : IResumeClient
 {
     private readonly Dictionary<string, JsonNode> _resumes = [];
+    private readonly List<string> _reads = [];
     private readonly List<(string ResumeId, JsonNode Resume)> _writes = [];
 
+    public IReadOnlyList<string> Reads => _reads;
+
     public IReadOnlyList<(string ResumeId, JsonNode Resume)> Writes => _writes;
+
+    public Exception? WriteException { get; set; }
 
     public void Seed(string resumeId, JsonNode resume) => _resumes[resumeId] = resume;
 
@@ -27,11 +32,19 @@ public class FakeResumeClient : IResumeClient
                 kvp.Value["updatedAt"]?.GetValue<string>() ?? ""))
             .ToList());
 
-    public Task<JsonNode?> ReadResumeAsync(string resumeId, CancellationToken cancellationToken = default) =>
-        Task.FromResult(_resumes.TryGetValue(resumeId, out var resume) ? resume.DeepClone() : null);
+    public Task<JsonNode?> ReadResumeAsync(string resumeId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _reads.Add(resumeId);
+        return Task.FromResult(_resumes.TryGetValue(resumeId, out var resume) ? resume.DeepClone() : null);
+    }
 
     public Task<JsonNode?> WriteResumeAsync(string resumeId, JsonNode resume, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (WriteException is not null)
+            throw WriteException;
+
         _writes.Add((resumeId, resume.DeepClone()));
 
         var existing = _resumes.TryGetValue(resumeId, out var current) ? current : new JsonObject();

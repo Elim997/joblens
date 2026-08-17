@@ -13,6 +13,12 @@ public record ScoredMark(string MessageId, int Score, string Reasoning, string T
 // legitimately have no template attributed to it.
 public record StoredMatch(string MessageId, JobPosting Posting, int Score, string Reasoning, string? TemplateName);
 
+// Score/Reasoning/SelectedTemplate are null together when the posting has never been scored,
+// and Score/Reasoning can be non-null with SelectedTemplate still null for a legacy row scored
+// before multi-template routing - callers must check SelectedTemplate specifically, not just
+// Score, before treating a posting as eligible for draft creation (see TailoredDraftService).
+public record ScoredPostingSnapshot(JobPosting Posting, int? Score, string? Reasoning, string? SelectedTemplate);
+
 public interface IDatastore
 {
     /// <summary>
@@ -32,11 +38,12 @@ public interface IDatastore
     Task UpsertAsync(string messageId, JobPosting posting, float[] embedding, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// A single stored posting by its message id, for the on-demand /tailor endpoint. Returns
-    /// null if never ingested (the caller turns that into a 404) - independent of whether it
-    /// has been scored yet.
+    /// A single stored posting by its message id, with its scoring metadata, for
+    /// TailoredDraftService (POST /tailor). Returns null if never ingested (the caller turns
+    /// that into a 404). A non-null result can still be scoring-ineligible for drafting - see
+    /// ScoredPostingSnapshot's remarks.
     /// </summary>
-    Task<JobPosting?> GetPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default);
+    Task<ScoredPostingSnapshot?> GetScoredPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<SimilarPosting>> QuerySimilarAsync(float[] queryEmbedding, int topK, CancellationToken cancellationToken = default);
 

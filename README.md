@@ -191,35 +191,66 @@ running:
 |---|---|
 | `POST /ingest` | Pulls new WhatsApp messages, parses, category-filters, embeds, and stores them in pgvector. |
 | `POST /run` | Scores every unscored posting in the archive against the profile and notifies matches. |
-| `GET /matches` | Stored matches (including `messageId`, score, and reasoning) from past runs; pass that id to preview `/tailor`. |
+| `GET /matches` | Stored matches (including `messageId`, score, and reasoning) from past runs; pass that id to `/tailor`. |
 | `GET /query?text=...` | Semantic search over the embedded posting archive. |
-| `POST /tailor?messageId=X&commit=false` | Previews (default) or, with `commit=true`, writes an AI-tailored resume rewrite back to Rezi for one stored posting. |
+| `POST /tailor?messageId=X` | Creates (or returns the existing) persisted `TailoredDraft` for one scored posting, using the posting's already-persisted scoring template. Zero Rezi writes. |
+| `GET /tailored` | Lists all persisted tailored drafts, newest first. |
+| `GET /tailored/{draftId}` | Retrieves one persisted tailored draft by id. |
+| `POST /tailored/{draftId}/export-to-rezi` | Writes that exact persisted draft's content to Rezi's `ForEditResumeId` slot and marks it exported. The only endpoint that writes to Rezi. |
 | `POST /eval` | Runs the hand-labeled set through the real scoring pipeline and reports precision/recall/F1. |
 
-### `/tailor` safety contract
+### Tailoring and export safety contract
 
-`commit` omitted, or `commit=false`, always produces a fully validated preview
-and zero Rezi writes. `commit=true` runs, in order: (1) validate the
-configured write destination (`Rezi:ForEditResumeId`, trimmed, non-blank, not
-equal to any base resume id) *before* any tailoring model call; (2) call the
-tailoring model and get back a `ValidatedTailoredResume`; (3) re-run
-`ValidateComplete` as a defense-in-depth gate; (4) build the write payload from
-that validated result only; (5) re-run `ValidateComplete` again immediately
-before writing; (6) make exactly one `WriteResumeAsync` call. The write
-destination is configuration-controlled and never model-controlled - the model
-picks *which base resume* to draw from, never *where the rewrite gets written*.
-JobLens does not automatically retry a failed write: if the transport fails
-after the request reached Rezi, a retry could duplicate or unexpectedly
-overwrite data, so an ambiguous write failure surfaces as an error instead of
-being silently retried.
+PostgreSQL is the source of truth for tailored drafts; Rezi is only a mutable
+editing workspace. `POST /tailor` never writes to Rezi and never lets the
+tailoring model choose a base resume - it uses the `selected_template` that
+scoring (`POST /run`) already persisted on the posting, maps that template
+name to exactly one configured `Rezi:BaseResumes` entry via a fail-closed
+1:1 name match (no live listing/reading of all Rezi resumes to choose among
+them), reads only that one base resume, tailors it, re-validates the result
+with `ResumeTailoringValidator.ValidateComplete`, and persists a new
+`TailoredDraft` row (or returns the existing one for that
+`(messageId, selectedTemplate, baseResumeId)` triple unchanged, without a
+second model call). A posting that was never scored, or was scored before
+multi-template support (`selected_template` is `NULL`), fails closed with a
+"rescore required" error rather than silently guessing. Draft content
+(summary, experience, skills, rationale) is immutable after creation - only
+`status`/`exportedAt` can change, and only via export.
+
+`POST /tailored/{draftId}/export-to-rezi` is the sole write path to Rezi. It
+loads the persisted draft, validates the write destination
+(`Rezi:ForEditResumeId`, trimmed, non-blank, not equal to any configured base
+resume id) *before* any write, re-validates the stored content defensively,
+builds the write payload from that exact stored content only, and makes
+exactly one `WriteResumeAsync` call. The draft is marked `ExportedToRezi`
+(with `exportedAt`) only *after* that write succeeds, so a failed write never
+falsely marks a draft exported. Exporting the same draft again, or exporting
+other drafts in between, is safe - each export re-reads the immutable stored
+snapshot for that specific draft id. JobLens does not automatically retry a
+failed write: if the transport fails after the request reached Rezi, a retry
+could duplicate or unexpectedly overwrite data, so an ambiguous write failure
+surfaces as an error instead of being silently retried.
+
+**`POST /tailor` status codes**
 
 | Status | Meaning |
 |---|---|
 | 404 | No stored posting for that `messageId`. |
+| 409 | Posting exists but has no persisted scoring template/score - rescore it first (`POST /run`). |
+| 500 | The persisted scoring template no longer maps to any configured `Rezi:BaseResumes` entry - a JobLens config-drift bug. |
 | 401 | Rezi authentication required (token missing/expired - see [SETUP.md](SETUP.md) step 7). |
 | 502 | Rezi upstream tool call failed, or the tailoring model returned unusable structured output. |
 | 503 | Tailoring model/provider unavailable at the transport level. |
 | 422 | Deterministic resume-tailoring validation failed (invented id, blank field, etc.) - well-formed response, unprocessable content. |
+
+**`POST /tailored/{draftId}/export-to-rezi` status codes**
+
+| Status | Meaning |
+|---|---|
+| 404 | No persisted draft for that `draftId`. |
+| 401 | Rezi authentication required (token missing/expired - see [SETUP.md](SETUP.md) step 7). |
+| 502 | Rezi upstream tool call failed. |
+| 422 | Stored draft content failed defensive re-validation before write. |
 | 500 | Unsafe or missing local write configuration (`Rezi:ForEditResumeId`) - a JobLens config bug, not an upstream failure. |
 
 None of these responses echo internal model output or the configured Rezi
@@ -228,16 +259,20 @@ resume id back to the caller.
 Relevance scoring is intentionally lower-risk and fail-soft, unlike tailoring:
 an invalid structured response gets one retry, and if it's still invalid that
 batch just returns no scores rather than failing the request. Resume tailoring
-is fail-closed instead - any failure anywhere in the chain above produces zero
-writes, never a partial or best-effort one.
+and export are fail-closed instead - any failure anywhere in either chain
+above produces zero writes and no status change, never a partial or
+best-effort one.
 
-175 tests pass (xUnit, non-live/default filter). Three integration test files -
-`EvalEndpointIntegrationTests`, `LlmRelevanceScorerIntegrationTests`, and
-`PgvectorDatastoreIntegrationTests` - need a live Postgres/Gemini/OmniRoute
-connection and are excluded from that default filter
-(`--filter "Category!=Integration"`). The whole loop - ingest, score, notify,
-tailor, and write back to Rezi - has been run end to end against real data, not
-just mocked.
+217 tests pass (xUnit, non-live/default filter). Four integration test files -
+`EvalEndpointIntegrationTests`, `LlmRelevanceScorerIntegrationTests`,
+`PgvectorDatastoreIntegrationTests`, and
+`PgvectorTailoredDraftStoreIntegrationTests` - need a live Postgres (the last
+two) or Postgres/Gemini/OmniRoute (the first two) connection and are excluded
+from that default filter (`--filter "Category!=Integration"`). The ingest,
+score, and notify loop has been run end to end against real data; persisted
+tailored-draft creation and export are covered by hermetic and Postgres
+integration tests but a live Rezi write has not been re-verified against this
+milestone's new explicit-export endpoint.
 
 ## Roadmap / designed but not built
 

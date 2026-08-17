@@ -1,7 +1,5 @@
 namespace JobLens.Core.Resume;
 
-public record BaseResumeSummary(string Id, string Name, string Summary);
-
 public record BaseSelection(string BaseResumeId, string BaseResumeName, string Rationale);
 
 /// <summary>ItemId is an existing item key from the chosen base resume - never a new one.</summary>

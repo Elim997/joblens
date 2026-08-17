@@ -96,7 +96,9 @@ builder.Services.AddSingleton<ITokenCache>(sp => new EncryptedFileTokenCache(
 #pragma warning restore CA1416
 builder.Services.AddSingleton<IResumeClient, RealResumeClient>();
 builder.Services.AddSingleton<IResumeTailor, LlmResumeTailor>();
-builder.Services.AddSingleton<ResumeTailoringRunner>();
+builder.Services.AddSingleton<ITailoredDraftStore, PgvectorTailoredDraftStore>();
+builder.Services.AddSingleton<TailoredDraftService>();
+builder.Services.AddSingleton<TailoredDraftExporter>();
 
 builder.Services.AddOpenApi();
 
@@ -218,22 +220,30 @@ app.MapGet("/query", async (
     return Results.Ok(results);
 });
 
-// Phase 3: tailor a resume for one stored posting. commit defaults to false (preview only -
-// returns the chosen base, rationale, and rewritten content, writes nothing) so an accidental
-// call never overwrites the "for edit" slot; commit=true is the only path in JobLens that
-// writes to Rezi, and only ever to that one configured slot (see ResumeTailoringRunner).
+// Creates a persistent draft for one scored posting. The selected template comes only from the
+// persisted score, and this path never writes to Rezi. Repeated requests for the same posting,
+// template, and mapped base return the existing draft without another tailoring-model call.
 app.MapPost("/tailor", async (
     string messageId,
-    ResumeTailoringRunner runner,
-    CancellationToken cancellationToken,
-    bool commit = false) => // omitted commit query param -> preview, never a write
+    TailoredDraftService service,
+    CancellationToken cancellationToken) =>
 {
     try
     {
-        var result = await runner.RunAsync(messageId, commit, cancellationToken);
-        return result is null
+        var draft = await service.CreateOrGetAsync(messageId, cancellationToken);
+        return draft is null
             ? Results.NotFound(new { error = $"No stored posting found for messageId '{messageId}'." })
-            : Results.Ok(result);
+            : Results.Ok(draft);
+    }
+    catch (PostingNotScoredException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status409Conflict);
+    }
+    catch (ScoringTemplateResumeMappingException ex)
+    {
+        // A persisted trusted template no longer maps to a configured base - a JobLens config
+        // integrity problem, never permission to silently choose another base.
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status500InternalServerError);
     }
     catch (ReziAuthenticationRequiredException ex)
     {
@@ -241,34 +251,70 @@ app.MapPost("/tailor", async (
     }
     catch (ReziToolCallException ex)
     {
-        // Rezi itself reported a failure (not auth, not a JobLens bug) - a legible 502
-        // ("upstream failed") beats an opaque unhandled-exception 500.
         return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
     }
     catch (TailoringModelUnavailableException ex)
     {
-        // The tailoring chat client itself was unreachable/failed at the transport level -
-        // "service unavailable" is more accurate than an opaque 500, and matches the intent of
-        // ReziToolCallException's 502 for the equivalent Rezi-side failure.
         return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status503ServiceUnavailable);
     }
     catch (TailoringOutputInvalidException ex)
     {
-        // The model responded but never produced parseable output after retries - an upstream
-        // (model-side) failure, not a JobLens bug, so 502 rather than 500.
         return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
     }
     catch (ResumeTailoringValidationException ex)
     {
-        // The model's output parsed but failed validation against the base resume it claims to
-        // rewrite (invented id, blank field, etc.) - a 422 ("well-formed but unprocessable"),
-        // never a write.
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status422UnprocessableEntity);
+    }
+});
+
+// Stored TailoredDrafts are JobLens's source of truth; listing is newest first.
+app.MapGet("/tailored", async (
+    ITailoredDraftStore draftStore,
+    CancellationToken cancellationToken) =>
+{
+    var drafts = await draftStore.ListAsync(cancellationToken);
+    return Results.Ok(drafts);
+});
+
+app.MapGet("/tailored/{draftId}", async (
+    string draftId,
+    ITailoredDraftStore draftStore,
+    CancellationToken cancellationToken) =>
+{
+    var draft = await draftStore.GetByIdAsync(draftId, cancellationToken);
+    return draft is null
+        ? Results.NotFound(new { error = $"No tailored draft found for draftId '{draftId}'." })
+        : Results.Ok(draft);
+});
+
+// The only Rezi write path in JobLens: exports this exact stored draft to the configured mutable
+// "for edit" resume. It never re-runs tailoring and never writes to a configured base resume.
+app.MapPost("/tailored/{draftId}/export-to-rezi", async (
+    string draftId,
+    TailoredDraftExporter exporter,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var draft = await exporter.ExportAsync(draftId, cancellationToken);
+        return draft is null
+            ? Results.NotFound(new { error = $"No tailored draft found for draftId '{draftId}'." })
+            : Results.Ok(draft);
+    }
+    catch (ReziAuthenticationRequiredException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+    catch (ReziToolCallException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status502BadGateway);
+    }
+    catch (ResumeTailoringValidationException ex)
+    {
         return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status422UnprocessableEntity);
     }
     catch (ResumeWriteConfigurationException ex)
     {
-        // The write destination itself is unsafe (missing or equal to a base id) - a JobLens
-        // config bug, not an upstream failure, so 500.
         return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status500InternalServerError);
     }
 });

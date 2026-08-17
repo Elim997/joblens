@@ -1,18 +1,20 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using JobLens.Core.Configuration;
 using JobLens.Core.Embedding;
 using JobLens.Core.Llm;
 using JobLens.Core.Parsing;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace JobLens.Core.Resume;
 
 /// <summary>
 /// IResumeTailor over a role-specific chat client + IResumeClient. Bases are read-only: this class only ever calls
-/// IResumeClient.ReadResumeAsync, never WriteResumeAsync - see Phase 3 for the write step.
+/// IResumeClient.ReadResumeAsync, never WriteResumeAsync - writing is TailoredDraftExporter's job, and this class
+/// has no dependency on it at all.
+///
+/// Which base to read is entirely the caller's decision (TailoredDraftService, from the posting's
+/// persisted scoring template) - this class no longer asks the model to pick one.
 ///
 /// Model output never crosses this boundary trusted: the rewrite is parsed into UntrustedRewrite
 /// (every field nullable), and the only way to turn that into the ValidatedTailoredResume this
@@ -22,23 +24,25 @@ namespace JobLens.Core.Resume;
 public class LlmResumeTailor(
     IResumeClient resumeClient,
     ITailoringChatClient tailoringChatClient,
-    IOptions<ReziOptions> options,
     ILogger<LlmResumeTailor> logger) : IResumeTailor
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     private IChatClient ChatClient => tailoringChatClient.ChatClient;
 
-    private readonly SemaphoreSlim _baseSummariesLock = new(1, 1);
-    private IReadOnlyList<BaseResumeSummary>? _baseSummaries;
-
-    public async Task<ValidatedTailoredResume> TailorAsync(JobPosting posting, CancellationToken cancellationToken = default)
+    public async Task<ValidatedTailoredResume> TailorAsync(
+        JobPosting posting, string baseResumeId, string baseResumeName, CancellationToken cancellationToken = default)
     {
-        var bases = await GetBaseSummariesAsync(cancellationToken);
-        var selection = await SelectBaseAsync(posting, bases, cancellationToken);
+        var baseResume = await resumeClient.ReadResumeAsync(baseResumeId, cancellationToken)
+            ?? throw new InvalidOperationException($"Base resume '{baseResumeName}' ({baseResumeId}) not found.");
 
-        var baseResume = await resumeClient.ReadResumeAsync(selection.BaseResumeId, cancellationToken)
-            ?? throw new InvalidOperationException($"Base resume '{selection.BaseResumeName}' ({selection.BaseResumeId}) not found.");
+        // Deterministic, not model-produced: the base was already chosen by the caller from
+        // trusted persisted scoring metadata, so there is nothing for the model to rationalize -
+        // this string only exists because ResumeTailoringValidator still requires a non-blank
+        // BaseSelection.Rationale.
+        var selection = new BaseSelection(
+            baseResumeId, baseResumeName,
+            $"Selected via the posting's persisted scoring template ('{baseResumeName}').");
 
         var snapshot = new BaseResumeSnapshot(
             selection,
@@ -52,77 +56,6 @@ public class LlmResumeTailor(
         // ResumeTailoringValidationException rather than let a malformed or dishonest rewrite
         // cross into a trusted result.
         return ResumeTailoringValidator.Validate(snapshot, rewrite);
-    }
-
-    private async Task<IReadOnlyList<BaseResumeSummary>> GetBaseSummariesAsync(CancellationToken cancellationToken)
-    {
-        if (_baseSummaries is not null)
-            return _baseSummaries;
-
-        await _baseSummariesLock.WaitAsync(cancellationToken);
-        try
-        {
-            if (_baseSummaries is not null)
-                return _baseSummaries;
-
-            if (options.Value.BaseResumes.Count == 0)
-                throw new InvalidOperationException("No base resumes configured (Rezi:BaseResumes).");
-
-            var summaries = new List<BaseResumeSummary>();
-            foreach (var b in options.Value.BaseResumes)
-            {
-                var resume = await resumeClient.ReadResumeAsync(b.Id, cancellationToken)
-                    ?? throw new InvalidOperationException($"Base resume '{b.Name}' ({b.Id}) not found.");
-                var summary = resume["data"]?["summary"]?["summary"]?.GetValue<string>() ?? "";
-                summaries.Add(new BaseResumeSummary(b.Id, b.Name, summary));
-            }
-
-            _baseSummaries = summaries;
-            return _baseSummaries;
-        }
-        finally
-        {
-            _baseSummariesLock.Release();
-        }
-    }
-
-    private async Task<BaseSelection> SelectBaseAsync(
-        JobPosting posting, IReadOnlyList<BaseResumeSummary> bases, CancellationToken cancellationToken)
-    {
-        var basesText = string.Join("\n\n", bases.Select((b, i) => $"[{i}] {b.Name}: {b.Summary}"));
-        var messages = new List<ChatMessage>
-        {
-            new(ChatRole.System, """
-                You pick which of a candidate's resume bases best fits a job posting.
-                Respond with ONLY JSON, no markdown fences, no extra text:
-                {"index": 0, "rationale": "one short sentence"}
-                """),
-            new(ChatRole.User, $"Job posting:\n{JobPostingTextNormalizer.ToEmbeddingText(posting)}\n\nBases:\n{basesText}"),
-        };
-        var chatOptions = new ChatOptions { ResponseFormat = ChatResponseFormat.Json };
-
-        UntrustedSelection? parsed = null;
-        for (var attempt = 1; attempt <= 2 && parsed is null; attempt++)
-        {
-            var response = await GetChatResponseAsync(messages, chatOptions, cancellationToken);
-            var candidate = TryParse<UntrustedSelection>(response.Text);
-            if (candidate?.Index is null ||
-                candidate.Index < 0 ||
-                candidate.Index >= bases.Count ||
-                string.IsNullOrWhiteSpace(candidate.Rationale))
-            {
-                logger.LogWarning("Base selection response invalid on attempt {Attempt}/2.", attempt);
-                continue;
-            }
-
-            parsed = candidate;
-        }
-
-        if (parsed?.Index is not int selectedIndex || string.IsNullOrWhiteSpace(parsed.Rationale))
-            throw new TailoringOutputInvalidException("Tailoring model did not return a usable base selection after 2 attempts.");
-
-        var chosen = bases[selectedIndex];
-        return new BaseSelection(chosen.Id, chosen.Name, parsed.Rationale.Trim());
     }
 
     private async Task<UntrustedRewrite> RewriteAsync(

@@ -101,12 +101,12 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task<JobPosting?> GetPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default)
+    public async Task<ScoredPostingSnapshot?> GetScoredPostingByMessageIdAsync(string messageId, CancellationToken cancellationToken = default)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT title, company, location, category, apply_url, description
+            SELECT title, company, location, category, apply_url, description, score, reasoning, selected_template
             FROM job_postings
             WHERE message_id = @messageId;
             """;
@@ -116,13 +116,20 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         if (!await reader.ReadAsync(cancellationToken))
             return null;
 
-        return new JobPosting(
+        var posting = new JobPosting(
             Title: reader.GetString(0),
             Company: reader.GetString(1),
             Location: reader.GetString(2),
             Category: reader.GetString(3),
             ApplyUrl: reader.GetString(4),
             Description: reader.GetString(5));
+        // score/reasoning/selected_template are all NULL until scored, and selected_template
+        // specifically stays NULL forever on a legacy pre-multi-template row - all three reads
+        // must stay null-safe.
+        var score = reader.IsDBNull(6) ? (int?)null : reader.GetInt32(6);
+        var reasoning = reader.IsDBNull(7) ? null : reader.GetString(7);
+        var selectedTemplate = reader.IsDBNull(8) ? null : reader.GetString(8);
+        return new ScoredPostingSnapshot(posting, score, reasoning, selectedTemplate);
     }
 
     public async Task<IReadOnlyList<SimilarPosting>> QuerySimilarAsync(float[] queryEmbedding, int topK, CancellationToken cancellationToken = default)

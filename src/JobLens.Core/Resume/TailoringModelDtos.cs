@@ -1,14 +1,6 @@
 namespace JobLens.Core.Resume;
 
 /// <summary>
-/// Raw tailoring base-selection JSON, deserialized but not trusted: Index is nullable so a
-/// missing key shows up as null rather than silently defaulting to 0 (a real, valid index).
-/// Nothing downstream may use Index without an explicit null/range check - see
-/// LlmResumeTailor.SelectBaseAsync.
-/// </summary>
-internal sealed record UntrustedSelection(int? Index, string? Rationale);
-
-/// <summary>
 /// One experience/skill rewrite entry, exactly as the model returned it. Experience items carry
 /// their text in Description, skill items in Skill - ResumeTailoringValidator reads the field
 /// that matches the section it's validating rather than merging the two, so a model that fills
