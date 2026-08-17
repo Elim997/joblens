@@ -21,7 +21,8 @@ var builder = WebApplication.CreateBuilder(args);
 var config = builder.Configuration;
 
 // JobLens config: MessagesDbPath + GroupChatJids come from user-secrets (identifying),
-// TargetCategories/Profile/ScoringTopK from appsettings. Injected later as IOptions<JobLensOptions>.
+// TargetCategories/ScoringTemplates/ScoringTopK from appsettings. Injected later as
+// IOptions<JobLensOptions>.
 builder.Services.Configure<JobLensOptions>(config.GetSection("JobLens"));
 builder.Services.Configure<LlmOptions>(config.GetSection("Llm"));
 
@@ -80,7 +81,7 @@ builder.Services.AddSingleton<IJobFeedSource, SqliteJobFeedSource>();
 builder.Services.AddSingleton<IPostingParser, WhatsAppPostingParser>();
 builder.Services.AddSingleton<IEmbedder, GeminiEmbedder>();
 builder.Services.AddSingleton<IDatastore, PgvectorDatastore>();
-builder.Services.AddSingleton<IProfileEmbeddingProvider, ProfileEmbeddingProvider>();
+builder.Services.AddSingleton<ITemplateCatalog, TemplateCatalog>();
 builder.Services.AddSingleton<IRelevanceScorer, LlmRelevanceScorer>();
 builder.Services.AddSingleton<INotifier, ConsoleNotifier>();
 builder.Services.AddSingleton<PipelineRunner>();
@@ -119,15 +120,14 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 // (embedding is the quota-limited step) and the remainder is embedded in batches, not
 // one API call per posting. The first embedding's live dimension sizes the schema.
 // Scoring here is a convenience over just this run's newly-embedded batch, not the
-// whole archive - Milestone 6's /run covers postings ingested before the profile
-// existed by pulling unscored postings from pgvector instead.
+// whole archive - Milestone 6's /run covers postings ingested before scoring was run
+// by pulling unscored postings from pgvector instead.
 app.MapPost("/ingest", async (
     IJobFeedSource feedSource,
     IPostingParser parser,
     IEmbedder embedder,
     IDatastore datastore,
     IRelevanceScorer scorer,
-    IProfileEmbeddingProvider profileEmbeddingProvider,
     IOptions<JobLensOptions> options,
     CancellationToken cancellationToken) =>
 {
@@ -153,9 +153,8 @@ app.MapPost("/ingest", async (
         for (var i = 0; i < toEmbed.Count; i++)
             await datastore.UpsertAsync(toEmbed[i].Message.Id, toEmbed[i].Posting!, embeddings[i], cancellationToken);
 
-        var profileEmbedding = await profileEmbeddingProvider.GetProfileEmbeddingAsync(cancellationToken);
         var scoringCandidates = toEmbed.Select((x, i) => (x.Message.Id, x.Posting!, embeddings[i])).ToList();
-        matches = await scorer.ScoreAsync(scoringCandidates, profileEmbedding, cancellationToken);
+        matches = await scorer.ScoreAsync(scoringCandidates, cancellationToken);
     }
 
     return Results.Ok(new
@@ -169,8 +168,9 @@ app.MapPost("/ingest", async (
     });
 });
 
-// The real "score my whole archive" loop: ranks every unscored posting in pgvector
-// against the profile (not just a fresh /ingest batch), scores it in bounded
+// The real "score my whole archive" loop: routes/ranks every unscored posting in
+// pgvector against the configured scoring templates (not just a fresh /ingest batch),
+// scores it in bounded
 // ScoringTopK batches - looping until the backlog is drained or a batch returns zero
 // usable scores - notifies matches at/above MatchThreshold (deduped across the whole
 // run, not just per batch), and marks exactly what got scored so a later run never
@@ -289,6 +289,21 @@ public partial class Program
             throw new InvalidOperationException("Missing JobLens:MessagesDbPath");
         if (config.GetSection("JobLens:GroupChatJids").Get<string[]>() is not { Length: > 0 })
             throw new InvalidOperationException("Missing JobLens:GroupChatJids (must be a non-empty array)");
+
+        var scoringTemplates = config.GetSection("JobLens:ScoringTemplates").Get<ScoringTemplateOptions[]>();
+        if (scoringTemplates is not { Length: > 0 })
+            throw new InvalidOperationException("Missing JobLens:ScoringTemplates (must be a non-empty array)");
+        if (scoringTemplates.Any(t => string.IsNullOrWhiteSpace(t.Name) || string.IsNullOrWhiteSpace(t.Profile)))
+        {
+            throw new InvalidOperationException(
+                "Each JobLens:ScoringTemplates entry must have a non-empty Name and Profile");
+        }
+        if (scoringTemplates.Select(t => t.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() !=
+            scoringTemplates.Length)
+        {
+            throw new InvalidOperationException("JobLens:ScoringTemplates names must be unique");
+        }
+
         if (string.IsNullOrWhiteSpace(config["Postgres:ConnectionString"]))
             throw new InvalidOperationException("Missing Postgres:ConnectionString");
         if (string.IsNullOrWhiteSpace(config["Gemini:ApiKey"]))

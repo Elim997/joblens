@@ -23,8 +23,8 @@ public class EvalHarnessTests
     private static EvalHarness CreateHarness(
         Func<IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)>, IReadOnlyList<ScoredPosting>> respond,
         int matchThreshold = 70) =>
-        new(new FakeEmbedder(), new FakeRelevanceScorer(respond), new FakeProfileEmbeddingProvider([1f, 0f, 0f]),
-            Options.Create(new JobLensOptions { Profile = "test profile", MatchThreshold = matchThreshold }));
+        new(new FakeEmbedder(), new FakeRelevanceScorer(respond),
+            Options.Create(new JobLensOptions { MatchThreshold = matchThreshold }));
 
     [Fact]
     public async Task RunAsync_MixOfTruePositiveFalsePositiveFalseNegativeTrueNegative_ComputesKnownPrecisionRecallF1()
@@ -44,7 +44,7 @@ public class EvalHarnessTests
         };
 
         var harness = CreateHarness(candidates =>
-            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, scores[c.Id], "reason")).ToList());
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, scores[c.Id], "reason", "General")).ToList());
 
         var report = await harness.RunAsync(labeled);
 
@@ -54,6 +54,7 @@ public class EvalHarnessTests
         Assert.Equal(0.5, report.F1);
         Assert.Equal(4, report.Items.Count);
         Assert.Equal(TestCaveat, report.Caveat);
+        Assert.All(report.Items, i => Assert.Equal("General", i.SelectedTemplate));
     }
 
     [Fact]
@@ -62,7 +63,7 @@ public class EvalHarnessTests
         var labeled = MakeLabeledSet(("relevant", true), ("irrelevant", false));
 
         var harness = CreateHarness(candidates =>
-            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, c.Id == "relevant" ? 100 : 0, "reason")).ToList());
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, c.Id == "relevant" ? 100 : 0, "reason", "General")).ToList());
 
         var report = await harness.RunAsync(labeled);
 
@@ -80,7 +81,7 @@ public class EvalHarnessTests
         var labeled = MakeLabeledSet(("scored", true), ("dropped", true));
 
         var harness = CreateHarness(candidates =>
-            candidates.Where(c => c.Id == "scored").Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason")).ToList());
+            candidates.Where(c => c.Id == "scored").Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
 
         var report = await harness.RunAsync(labeled);
 
@@ -88,6 +89,11 @@ public class EvalHarnessTests
         Assert.False(droppedItem.PredictedRelevant);
         Assert.Equal(0, droppedItem.Score);
         Assert.Contains("Not scored", droppedItem.Reasoning);
+        // Never scored, so no template group ever ran for it - no provenance to report.
+        Assert.Null(droppedItem.SelectedTemplate);
+
+        var scoredItem = report.Items.Single(i => i.MessageId == "scored");
+        Assert.Equal("General", scoredItem.SelectedTemplate);
 
         // 1 true positive ("scored"), 1 false negative ("dropped"): no false positives,
         // so precision is untouched but recall is dragged down to 1/2.
@@ -101,7 +107,7 @@ public class EvalHarnessTests
         var labeled = MakeLabeledSet(("a", false), ("b", false));
 
         var harness = CreateHarness(candidates =>
-            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 10, "reason")).ToList());
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 10, "reason", "General")).ToList());
 
         var report = await harness.RunAsync(labeled);
 
@@ -132,7 +138,7 @@ public class EvalHarnessTests
         var labeled = MakeLabeledSet(("at-threshold", true));
 
         var harness = CreateHarness(
-            candidates => candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 70, "reason")).ToList(),
+            candidates => candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 70, "reason", "General")).ToList(),
             matchThreshold: 70);
 
         var report = await harness.RunAsync(labeled);

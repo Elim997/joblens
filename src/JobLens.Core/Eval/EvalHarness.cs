@@ -6,15 +6,15 @@ using Microsoft.Extensions.Options;
 namespace JobLens.Core.Eval;
 
 /// <summary>
-/// Runs every labeled posting through the same embed -> cosine prefilter -> Gemini
-/// score path PipelineRunner uses, thresholds at MatchThreshold, and compares the
+/// Runs every labeled posting through the same embed -> local template routing/cosine
+/// prefilter -> OmniRoute score path PipelineRunner uses, thresholds at MatchThreshold, and
+/// compares the
 /// prediction to the human-labeled IsRelevant to compute precision/recall/F1. This is
 /// the only thing that tells us whether the scorer is actually good, not just running.
 /// </summary>
 public class EvalHarness(
     IEmbedder embedder,
     IRelevanceScorer scorer,
-    IProfileEmbeddingProvider profileEmbeddingProvider,
     IOptions<JobLensOptions> options)
 {
     public async Task<EvalReport> RunAsync(LabeledPostingSet labeledSet, CancellationToken cancellationToken = default)
@@ -24,12 +24,11 @@ public class EvalHarness(
 
         var texts = labeledSet.Postings.Select(l => JobPostingTextNormalizer.ToEmbeddingText(l.Posting)).ToList();
         var embeddings = await embedder.EmbedBatchAsync(texts, cancellationToken);
-        var profileEmbedding = await profileEmbeddingProvider.GetProfileEmbeddingAsync(cancellationToken);
 
         var candidates = labeledSet.Postings
             .Select((l, i) => (l.MessageId, l.Posting, embeddings[i]))
             .ToList();
-        var scored = await scorer.ScoreAsync(candidates, profileEmbedding, cancellationToken);
+        var scored = await scorer.ScoreAsync(candidates, cancellationToken);
         var scoredById = scored.ToDictionary(s => s.Id);
 
         var threshold = options.Value.MatchThreshold;
@@ -39,10 +38,10 @@ public class EvalHarness(
             // malformed model response, was never actually scored - count it as
             // predicted-not-relevant instead of crashing or silently omitting it.
             if (scoredById.TryGetValue(l.MessageId, out var s))
-                return new EvalItem(l.MessageId, l.Posting.Title, l.IsRelevant, s.Score >= threshold, s.Score, s.Reasoning);
+                return new EvalItem(l.MessageId, l.Posting.Title, l.IsRelevant, s.Score >= threshold, s.Score, s.Reasoning, s.TemplateName);
 
             return new EvalItem(l.MessageId, l.Posting.Title, l.IsRelevant, false, 0,
-                "Not scored - outside the shortlist cutoff or dropped by the model.");
+                "Not scored - outside the shortlist cutoff or dropped by the model.", null);
         }).ToList();
 
         var truePositives = items.Count(i => i.ActualRelevant && i.PredictedRelevant);

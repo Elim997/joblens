@@ -9,19 +9,26 @@ namespace JobLens.Tests.Pipeline;
 // PipelineRunner and throw if they ever are.
 public class FakeDatastore : IDatastore
 {
-    private record Row(string MessageId, JobPosting Posting, float[] Embedding, DateTimeOffset? ScoredAt, int? Score, string? Reasoning);
+    private record Row(
+        string MessageId,
+        JobPosting Posting,
+        float[] Embedding,
+        DateTimeOffset? ScoredAt,
+        int? Score,
+        string? Reasoning,
+        string? TemplateName);
 
     private readonly List<Row> _rows = [];
 
     public void Seed(string messageId, JobPosting posting, float[] embedding) =>
-        _rows.Add(new Row(messageId, posting, embedding, null, null, null));
+        _rows.Add(new Row(messageId, posting, embedding, null, null, null, null));
 
     public IReadOnlyList<string> ScoredMessageIds => _rows.Where(r => r.ScoredAt is not null).Select(r => r.MessageId).ToList();
 
-    public (int Score, string Reasoning) GetPersistedScoreAndReasoning(string messageId)
+    public (int Score, string Reasoning, string TemplateName) GetPersistedScore(string messageId)
     {
         var row = _rows.Single(r => r.MessageId == messageId);
-        return (row.Score!.Value, row.Reasoning!);
+        return (row.Score!.Value, row.Reasoning!, row.TemplateName!);
     }
 
     public Task EnsureSchemaAsync(int dimension, CancellationToken cancellationToken = default) =>
@@ -51,7 +58,13 @@ public class FakeDatastore : IDatastore
         for (var i = 0; i < _rows.Count; i++)
         {
             if (byId.TryGetValue(_rows[i].MessageId, out var mark))
-                _rows[i] = _rows[i] with { ScoredAt = DateTimeOffset.UtcNow, Score = mark.Score, Reasoning = mark.Reasoning };
+                _rows[i] = _rows[i] with
+                {
+                    ScoredAt = DateTimeOffset.UtcNow,
+                    Score = mark.Score,
+                    Reasoning = mark.Reasoning,
+                    TemplateName = mark.TemplateName,
+                };
         }
 
         return Task.CompletedTask;

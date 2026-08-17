@@ -10,6 +10,7 @@ namespace JobLens.Core.Scoring;
 
 public class LlmRelevanceScorer(
     IScoringChatClient scoringChatClient,
+    ITemplateCatalog templateCatalog,
     IOptions<JobLensOptions> options,
     ILogger<LlmRelevanceScorer> logger) : IRelevanceScorer
 {
@@ -19,24 +20,67 @@ public class LlmRelevanceScorer(
 
     public async Task<IReadOnlyList<ScoredPosting>> ScoreAsync(
         IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)> candidates,
-        float[] profileEmbedding,
         CancellationToken cancellationToken = default)
     {
         if (candidates.Count == 0)
             return [];
 
-        var shortlist = candidates
-            .OrderByDescending(c => VectorMath.CosineSimilarity(c.Embedding, profileEmbedding))
+        var templates = await templateCatalog.GetTemplatesAsync(cancellationToken);
+        if (templates.Count == 0)
+        {
+            logger.LogWarning("No scoring templates configured; returning no matches for this batch of {Count}.", candidates.Count);
+            return [];
+        }
+
+        // Route each candidate to whichever template's profile it's closest to - local
+        // cosine similarity only, no model call, no Rezi read. The single global
+        // ScoringTopK cutoff is then applied once across ALL candidates by that
+        // best-template similarity, exactly as it was previously applied against one
+        // profile embedding, so PipelineRunner's batch-size semantics are unchanged.
+        var routed = candidates
+            .Select(c =>
+            {
+                var (template, similarity) = templates
+                    .Select(t => (Template: t, Similarity: VectorMath.CosineSimilarity(c.Embedding, t.Embedding)))
+                    .MaxBy(x => x.Similarity);
+                return (c.Id, c.Posting, Template: template, Similarity: similarity);
+            })
+            .OrderByDescending(r => r.Similarity)
             .Take(options.Value.ScoringTopK)
-            .Select(c => (c.Id, c.Posting))
             .ToList();
 
-        var messages = BuildPrompt(options.Value.Profile, shortlist.Select(s => s.Posting).ToList());
         var chatOptions = new ChatOptions { ResponseFormat = ChatResponseFormat.Json };
 
+        // Grouped by the locally-selected template and scored with the existing
+        // OmniRoute prompt, reused verbatim per group - the model sees only that
+        // group's shortlist and its template's profile text, and is never asked to
+        // choose or return a template/resume id itself (LlmResumeTailor's existing
+        // "trusted code resolves the id" precedent, applied here without a model call
+        // at all). Each group fails soft independently: one group's malformed response
+        // or transport failure doesn't lose another group's results.
+        var results = new List<ScoredPosting>();
+        foreach (var group in routed.GroupBy(r => r.Template))
+        {
+            var shortlist = group.Select(g => (g.Id, g.Posting)).ToList();
+            var groupResults = await ScoreGroupAsync(group.Key.Name, group.Key.Profile, shortlist, chatOptions, cancellationToken);
+            results.AddRange(groupResults);
+        }
+
+        return results.OrderByDescending(r => r.Score).ToList();
+    }
+
+    private async Task<List<ScoredPosting>> ScoreGroupAsync(
+        string templateName,
+        string profile,
+        IReadOnlyList<(string Id, JobPosting Posting)> shortlist,
+        ChatOptions chatOptions,
+        CancellationToken cancellationToken)
+    {
+        var messages = BuildPrompt(profile, shortlist.Select(s => s.Posting).ToList());
+
         // Structural failure (invalid JSON): retry the identical call once, then give
-        // up on the whole batch rather than throw - a bad model response never crashes
-        // the run, it just means nothing gets scored this time.
+        // up on this template's group rather than throw - a bad model response never
+        // crashes the run, it just means nothing gets scored for this group this time.
         List<ScoreResponseItem>? items = null;
         try
         {
@@ -45,7 +89,7 @@ public class LlmRelevanceScorer(
                 var response = await ChatClient.GetResponseAsync(messages, chatOptions, cancellationToken);
                 items = TryParse(response.Text);
                 if (items is null)
-                    logger.LogWarning("Scoring response was not valid JSON on attempt {Attempt}/2.", attempt);
+                    logger.LogWarning("Scoring response for template '{Template}' was not valid JSON on attempt {Attempt}/2.", templateName, attempt);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -55,15 +99,19 @@ public class LlmRelevanceScorer(
         catch (Exception ex)
         {
             logger.LogWarning(
-                "Scoring model request failed with {ExceptionType}; returning no matches for this batch of {Count}.",
+                "Scoring model request failed with {ExceptionType} for template '{Template}'; returning no matches for this group of {Count}.",
                 ex.GetType().Name,
+                templateName,
                 shortlist.Count);
             return [];
         }
 
         if (items is null)
         {
-            logger.LogWarning("Scoring gave up after 2 attempts; returning no matches for this batch of {Count}.", shortlist.Count);
+            logger.LogWarning(
+                "Scoring gave up after 2 attempts for template '{Template}'; returning no matches for this group of {Count}.",
+                templateName,
+                shortlist.Count);
             return [];
         }
 
@@ -97,10 +145,10 @@ public class LlmRelevanceScorer(
                 continue;
             }
 
-            results.Add(new ScoredPosting(shortlist[item.Index].Id, shortlist[item.Index].Posting, item.Score, item.Reasoning));
+            results.Add(new ScoredPosting(shortlist[item.Index].Id, shortlist[item.Index].Posting, item.Score, item.Reasoning, templateName));
         }
 
-        return results.OrderByDescending(r => r.Score).ToList();
+        return results;
     }
 
     private static IReadOnlyList<ChatMessage> BuildPrompt(string profile, IReadOnlyList<JobPosting> shortlist)

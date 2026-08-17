@@ -1,5 +1,4 @@
 using JobLens.Core.Configuration;
-using JobLens.Core.Embedding;
 using JobLens.Core.Notification;
 using JobLens.Core.Parsing;
 using JobLens.Core.Scoring;
@@ -17,9 +16,9 @@ namespace JobLens.Core.Pipeline;
 public record RunSummary(int Batches, int Scored, int Matched, int Notified, bool StoppedEarly, string? StopReason);
 
 /// <summary>
-/// The "score my whole archive" loop: repeatedly ranks every still-unscored posting in
-/// pgvector against the profile, sends it to the model (which internally bounds each call
-/// to ScoringTopK candidates via its own cosine prefilter), notifies matches at or above
+/// The "score my whole archive" loop: repeatedly routes and ranks every still-unscored
+/// posting against the configured scoring templates, sends it to the model (which internally
+/// bounds each call to ScoringTopK candidates via its own cosine prefilter), notifies matches at or above
 /// MatchThreshold, and marks exactly what the model actually scored as scored_at=now - then
 /// loops again on whatever backlog remains, since MarkScoredAsync shrinks what the next
 /// GetUnscoredPostingsAsync call returns. Keeps looping until the backlog is fully drained,
@@ -31,7 +30,6 @@ public record RunSummary(int Batches, int Scored, int Matched, int Notified, boo
 public class PipelineRunner(
     IDatastore datastore,
     IRelevanceScorer scorer,
-    IProfileEmbeddingProvider profileEmbeddingProvider,
     INotifier notifier,
     IOptions<JobLensOptions> options)
 {
@@ -48,11 +46,6 @@ public class PipelineRunner(
         // its duplicate is still recognized and never double-notified.
         var notifiedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Fetched lazily on the first batch that actually needs it, then reused for every
-        // subsequent batch in this run - the profile doesn't change mid-run, so there's no
-        // reason to re-embed it once per batch.
-        float[]? profileEmbedding = null;
-
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -61,10 +54,12 @@ public class PipelineRunner(
             if (unscored.Count == 0)
                 break;
 
-            profileEmbedding ??= await profileEmbeddingProvider.GetProfileEmbeddingAsync(cancellationToken);
             var candidates = unscored.Select(u => (u.MessageId, u.Posting, u.Embedding)).ToList();
 
-            var scored = await scorer.ScoreAsync(candidates, profileEmbedding, cancellationToken);
+            // Template routing (which scoring template each candidate is scored against) is
+            // resolved locally inside the scorer, per-candidate, from its own catalog - no
+            // profile embedding is fetched here anymore.
+            var scored = await scorer.ScoreAsync(candidates, cancellationToken);
             batches++;
 
             if (scored.Count == 0)
@@ -100,7 +95,7 @@ public class PipelineRunner(
             // considered. Persist score and reasoning too, so a match survives past this
             // response for GET /matches.
             await datastore.MarkScoredAsync(
-                scored.Select(s => new ScoredMark(s.Id, s.Score, s.Reasoning)).ToList(),
+                scored.Select(s => new ScoredMark(s.Id, s.Score, s.Reasoning, s.TemplateName)).ToList(),
                 cancellationToken);
 
             totalScored += scored.Count;

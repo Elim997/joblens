@@ -18,6 +18,10 @@ public class ConfigurationTests
                 ["JobLens:GroupChatJids:1"] = "111111111111111111@g.us",
                 ["JobLens:TargetCategories:0"] = "Software",
                 ["JobLens:TargetCategories:1"] = "QA",
+                ["JobLens:ScoringTemplates:0:Name"] = "Backend",
+                ["JobLens:ScoringTemplates:0:Profile"] = "C# and Postgres profile",
+                ["JobLens:ScoringTemplates:1:Name"] = "QA",
+                ["JobLens:ScoringTemplates:1:Profile"] = "Selenium automation profile",
             })
             .Build();
 
@@ -30,5 +34,16 @@ public class ConfigurationTests
         Assert.Equal("C:/data/messages.db", options.MessagesDbPath);
         Assert.Equal(["120363427094606388@g.us", "111111111111111111@g.us"], options.GroupChatJids);
         Assert.Equal(["Software", "QA"], options.TargetCategories);
+        Assert.Collection(options.ScoringTemplates,
+            backend =>
+            {
+                Assert.Equal("Backend", backend.Name);
+                Assert.Equal("C# and Postgres profile", backend.Profile);
+            },
+            qa =>
+            {
+                Assert.Equal("QA", qa.Name);
+                Assert.Equal("Selenium automation profile", qa.Profile);
+            });
     }
 }

@@ -12,8 +12,8 @@ using OpenAI;
 namespace JobLens.Tests.Scoring;
 
 // Needs a running OmniRoute instance and configured Llm settings: one real chat
-// completion call, no Postgres and no embedding calls. Candidate/profile "embeddings"
-// are hand-picked vectors used only by the scorer's local cosine pre-rank.
+// completion call, no Postgres and no embedding calls. Candidate/template "embeddings"
+// are hand-picked vectors used only by the scorer's local cosine routing and pre-rank.
 [Trait("Category", "Integration")]
 public class LlmRelevanceScorerIntegrationTests
 {
@@ -37,14 +37,14 @@ public class LlmRelevanceScorerIntegrationTests
             new OpenAIClientOptions { Endpoint = new Uri(baseUrl) });
         IChatClient chatClient = client.GetChatClient(scoringModel).AsIChatClient();
 
-        var options = Options.Create(new JobLensOptions
-        {
-            Profile = "Junior backend/full-stack engineer. C#/.NET, Selenium test automation, " +
-                      "building LLM agent pipelines and RAG systems, Postgres.",
-            ScoringTopK = 2,
-        });
+        var profile = "Junior backend/full-stack engineer. C#/.NET, Selenium test automation, " +
+                      "building LLM agent pipelines and RAG systems, Postgres.";
+        var templateCatalog = new FakeTemplateCatalog(
+            new ScoringTemplate("General", profile, [1f, 0f, 0f]));
+        var options = Options.Create(new JobLensOptions { ScoringTopK = 2 });
         var scorer = new LlmRelevanceScorer(
             new ScoringChatClient(chatClient),
+            templateCatalog,
             options,
             NullLogger<LlmRelevanceScorer>.Instance);
 
@@ -61,10 +61,11 @@ public class LlmRelevanceScorerIntegrationTests
             ("unrelated-id", unrelatedPosting, [0f, 1f, 0f]),
         };
 
-        var results = await scorer.ScoreAsync(candidates, [1f, 0f, 0f]);
+        var results = await scorer.ScoreAsync(candidates);
 
         Assert.NotEmpty(results);
         Assert.All(results, r => Assert.InRange(r.Score, 0, 100));
         Assert.All(results, r => Assert.False(string.IsNullOrWhiteSpace(r.Reasoning)));
+        Assert.All(results, r => Assert.Equal("General", r.TemplateName));
     }
 }

@@ -16,8 +16,8 @@ public class PipelineRunnerTests
 
     private static PipelineRunner CreateRunner(
         FakeDatastore datastore, FakeRelevanceScorer scorer, FakeNotifier notifier, int matchThreshold = 70) =>
-        new(datastore, scorer, new FakeProfileEmbeddingProvider([1f, 0f, 0f]), notifier,
-            Options.Create(new JobLensOptions { Profile = "test profile", MatchThreshold = matchThreshold }));
+        new(datastore, scorer, notifier,
+            Options.Create(new JobLensOptions { MatchThreshold = matchThreshold }));
 
     [Fact]
     public async Task RunAsync_ScoresAll_NotifiesOnlyAtOrAboveThreshold_MarksEveryScoredPosting()
@@ -27,7 +27,7 @@ public class PipelineRunnerTests
         datastore.Seed("id-2", MakePosting("Low Score"), [0f, 1f, 0f]);
 
         var scorer = new FakeRelevanceScorer(candidates =>
-            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, c.Id == "id-1" ? 90 : 30, "reason")).ToList());
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, c.Id == "id-1" ? 90 : 30, "reason", "General")).ToList());
         var notifier = new FakeNotifier();
         var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
 
@@ -43,8 +43,8 @@ public class PipelineRunnerTests
         // Score and reasoning are persisted for both, not just the matched one -
         // this is the Milestone 6 follow-up gap: /run's response is a snapshot,
         // but the datastore must keep the data past that response.
-        Assert.Equal((90, "reason"), datastore.GetPersistedScoreAndReasoning("id-1"));
-        Assert.Equal((30, "reason"), datastore.GetPersistedScoreAndReasoning("id-2"));
+        Assert.Equal((90, "reason", "General"), datastore.GetPersistedScore("id-1"));
+        Assert.Equal((30, "reason", "General"), datastore.GetPersistedScore("id-2"));
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public class PipelineRunnerTests
         datastore.Seed("id-1", MakePosting("Exactly At Threshold"), [1f, 0f, 0f]);
 
         var scorer = new FakeRelevanceScorer(candidates =>
-            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 70, "reason")).ToList());
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 70, "reason", "General")).ToList());
         var notifier = new FakeNotifier();
         var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
 
@@ -126,7 +126,7 @@ public class PipelineRunnerTests
             // simulating the real scorer's own topK/validation cutoff leaving id-2 behind.
             if (callCount == 1)
                 return candidates.Where(c => c.Id == "id-1")
-                    .Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason")).ToList();
+                    .Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList();
             return [];
         });
         var notifier = new FakeNotifier();
@@ -164,7 +164,7 @@ public class PipelineRunnerTests
         datastore.Seed("id-5", MakePosting("E"), [1f, 0f, 0f]);
 
         var scorer = new FakeRelevanceScorer(candidates =>
-            candidates.Take(2).Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason")).ToList());
+            candidates.Take(2).Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
         var notifier = new FakeNotifier();
         var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
 
@@ -196,7 +196,7 @@ public class PipelineRunnerTests
         {
             callCount++;
             var toScore = callCount == 1 ? candidates.Where(c => c.Id != "id-2") : candidates;
-            return toScore.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason")).ToList();
+            return toScore.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList();
         });
         var notifier = new FakeNotifier();
         var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
@@ -226,7 +226,7 @@ public class PipelineRunnerTests
             var batch = candidates.Take(1).ToList();
             if (callCount == 2)
                 cts.Cancel(); // cancel after the 2nd batch is scored - the loop should not attempt a 3rd
-            return batch.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason")).ToList();
+            return batch.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList();
         });
         var notifier = new FakeNotifier();
         var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
@@ -255,7 +255,7 @@ public class PipelineRunnerTests
         {
             callCount++;
             var batch = callCount == 1 ? candidates.Take(1).ToList() : candidates.ToList();
-            return batch.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason")).ToList();
+            return batch.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList();
         });
         var notifier = new FakeNotifier();
         var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
@@ -278,7 +278,7 @@ public class PipelineRunnerTests
         datastore.Seed("id-2", MakePosting("Match Two"), [1f, 0f, 0f]);
 
         var scorer = new FakeRelevanceScorer(candidates =>
-            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason")).ToList());
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
         var notifier = new FakeNotifier();
         var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
 

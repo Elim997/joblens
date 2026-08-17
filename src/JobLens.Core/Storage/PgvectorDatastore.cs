@@ -32,20 +32,24 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     scored_at TIMESTAMPTZ NULL,
                     score INT NULL,
-                    reasoning TEXT NULL
+                    reasoning TEXT NULL,
+                    selected_template TEXT NULL
                 );
                 """;
             await tableCommand.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        // Migration path for a table created before Milestone 6: CREATE TABLE above
-        // won't touch an existing table, so add the columns separately, idempotently.
+        // Migration path for a table created before Milestone 6/multi-template scoring:
+        // CREATE TABLE above won't touch an existing table, so add the columns separately,
+        // idempotently. Rows scored before this migration keep selected_template NULL -
+        // they are never rescored automatically just to backfill it.
         await using var alterCommand = connection.CreateCommand();
         alterCommand.CommandText = """
             ALTER TABLE job_postings
                 ADD COLUMN IF NOT EXISTS scored_at TIMESTAMPTZ NULL,
                 ADD COLUMN IF NOT EXISTS score INT NULL,
-                ADD COLUMN IF NOT EXISTS reasoning TEXT NULL;
+                ADD COLUMN IF NOT EXISTS reasoning TEXT NULL,
+                ADD COLUMN IF NOT EXISTS selected_template TEXT NULL;
             """;
         await alterCommand.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -189,17 +193,19 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        // UNNEST zips the three arrays into rows, so each message_id gets its own
-        // score/reasoning in a single round trip instead of one UPDATE per posting.
+        // UNNEST zips the four arrays into rows, so each message_id gets its own
+        // score/reasoning/selected_template in a single round trip instead of one UPDATE
+        // per posting.
         command.CommandText = """
             UPDATE job_postings AS jp
-            SET scored_at = now(), score = data.score, reasoning = data.reasoning
-            FROM UNNEST(@ids, @scores, @reasonings) AS data(message_id, score, reasoning)
+            SET scored_at = now(), score = data.score, reasoning = data.reasoning, selected_template = data.selected_template
+            FROM UNNEST(@ids, @scores, @reasonings, @templateNames) AS data(message_id, score, reasoning, selected_template)
             WHERE jp.message_id = data.message_id;
             """;
         command.Parameters.AddWithValue("ids", scored.Select(s => s.MessageId).ToArray());
         command.Parameters.AddWithValue("scores", scored.Select(s => s.Score).ToArray());
         command.Parameters.AddWithValue("reasonings", scored.Select(s => s.Reasoning).ToArray());
+        command.Parameters.AddWithValue("templateNames", scored.Select(s => s.TemplateName).ToArray());
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -208,7 +214,7 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT message_id, title, company, location, category, apply_url, description, score, reasoning
+            SELECT message_id, title, company, location, category, apply_url, description, score, reasoning, selected_template
             FROM job_postings
             WHERE score >= @matchThreshold
             ORDER BY score DESC;
@@ -227,7 +233,10 @@ public class PgvectorDatastore(NpgsqlDataSource dataSource) : IDatastore
                 Category: reader.GetString(4),
                 ApplyUrl: reader.GetString(5),
                 Description: reader.GetString(6));
-            results.Add(new StoredMatch(messageId, posting, reader.GetInt32(7), reader.GetString(8)));
+            // selected_template is NULL for rows scored before this migration - never
+            // backfilled automatically, so this read must stay null-safe.
+            var templateName = reader.IsDBNull(9) ? null : reader.GetString(9);
+            results.Add(new StoredMatch(messageId, posting, reader.GetInt32(7), reader.GetString(8), templateName));
         }
 
         // The feed sometimes reposts the same job under a different message_id; collapse

@@ -11,7 +11,6 @@ public class FakeRelevanceScorer(
 
     public Task<IReadOnlyList<ScoredPosting>> ScoreAsync(
         IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)> candidates,
-        float[] profileEmbedding,
         CancellationToken cancellationToken = default)
     {
         Calls.Add(candidates);

@@ -6,16 +6,19 @@ public record SimilarPosting(JobPosting Posting, double Similarity);
 
 public record UnscoredPosting(string MessageId, JobPosting Posting, float[] Embedding);
 
-public record ScoredMark(string MessageId, int Score, string Reasoning);
+public record ScoredMark(string MessageId, int Score, string Reasoning, string TemplateName);
 
-public record StoredMatch(string MessageId, JobPosting Posting, int Score, string Reasoning);
+// TemplateName is nullable: rows scored before this milestone were persisted without a
+// selected_template value and are never rescored automatically, so a legacy match may
+// legitimately have no template attributed to it.
+public record StoredMatch(string MessageId, JobPosting Posting, int Score, string Reasoning, string? TemplateName);
 
 public interface IDatastore
 {
     /// <summary>
     /// Creates the pgvector extension/table if missing, sized to the given embedding
-    /// dimension, and adds the scored_at/score/reasoning columns if missing. Idempotent -
-    /// safe to call before every write or query.
+    /// dimension, and adds the scored_at/score/reasoning/selected_template columns if
+    /// missing. Idempotent - safe to call before every write or query.
     /// </summary>
     Task EnsureSchemaAsync(int dimension, CancellationToken cancellationToken = default);
 
@@ -44,9 +47,9 @@ public interface IDatastore
     Task<IReadOnlyList<UnscoredPosting>> GetUnscoredPostingsAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sets scored_at = now() and stores score/reasoning for each entry, so a posting is
-    /// never re-scored or re-notified by a later run and GetMatchesAsync can serve it
-    /// without a live model call. Called for every scored posting, matched or not.
+    /// Sets scored_at = now() and stores score/reasoning/selected_template for each entry,
+    /// so a posting is never re-scored or re-notified by a later run and GetMatchesAsync can
+    /// serve it without a live model call. Called for every scored posting, matched or not.
     /// </summary>
     Task MarkScoredAsync(IReadOnlyList<ScoredMark> scored, CancellationToken cancellationToken = default);
 

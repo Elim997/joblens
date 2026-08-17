@@ -145,9 +145,9 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
 
         await _datastore.MarkScoredAsync(
         [
-            new ScoredMark(highId, 95, "Great fit"),
-            new ScoredMark(lowId, 75, "Decent fit"),
-            new ScoredMark(belowThresholdId, 40, "Not a fit"),
+            new ScoredMark(highId, 95, "Great fit", "Backend"),
+            new ScoredMark(lowId, 75, "Decent fit", "QA"),
+            new ScoredMark(belowThresholdId, 40, "Not a fit", "Backend"),
         ]);
 
         var matches = await _datastore.GetMatchesAsync(matchThreshold: 70);
@@ -164,6 +164,41 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
         Assert.Equal(highId, highMatch.MessageId);
         Assert.Equal(95, highMatch.Score);
         Assert.Equal("Great fit", highMatch.Reasoning);
+        Assert.Equal("Backend", highMatch.TemplateName);
+    }
+
+
+    [Fact]
+    public async Task GetMatchesAsync_LegacyScoredRowWithoutSelectedTemplate_ReturnsNullTemplateName()
+    {
+        var id = $"test-selected-template-legacy-{Guid.NewGuid():N}";
+        _testMessageIds.Add(id);
+        var posting = new JobPosting(
+            "Legacy Match", "Acme", "Tel Aviv", "Software",
+            $"https://example.com/legacy-{Guid.NewGuid():N}", "- test legacy row");
+
+        var embedding = await _embedder.EmbedAsync("legacy selected template migration test");
+        await _datastore.EnsureSchemaAsync(embedding.Length);
+        await _datastore.UpsertAsync(id, posting, embedding);
+
+        await using (var connection = await _dataSource.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                UPDATE job_postings
+                SET scored_at = now(), score = 90, reasoning = 'Legacy score', selected_template = NULL
+                WHERE message_id = @messageId;
+                """;
+            command.Parameters.AddWithValue("messageId", id);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var matches = await _datastore.GetMatchesAsync(matchThreshold: 70);
+
+        var match = matches.Single(m => m.MessageId == id);
+        Assert.Equal(90, match.Score);
+        Assert.Equal("Legacy score", match.Reasoning);
+        Assert.Null(match.TemplateName);
     }
 
     [Fact]
@@ -188,8 +223,8 @@ public class PgvectorDatastoreIntegrationTests : IAsyncLifetime
 
         await _datastore.MarkScoredAsync(
         [
-            new ScoredMark(higherId, 95, "Great fit"),
-            new ScoredMark(lowerId, 80, "Also a fit, but a repost"),
+            new ScoredMark(higherId, 95, "Great fit", "Backend"),
+            new ScoredMark(lowerId, 80, "Also a fit, but a repost", "Backend"),
         ]);
 
         var matches = await _datastore.GetMatchesAsync(matchThreshold: 70);

@@ -14,6 +14,8 @@ public class ProgramValidationTests
     {
         ["JobLens:MessagesDbPath"] = "C:/dummy/messages.db",
         ["JobLens:GroupChatJids:0"] = "dummy@g.us",
+        ["JobLens:ScoringTemplates:0:Name"] = "General",
+        ["JobLens:ScoringTemplates:0:Profile"] = "dummy profile",
         ["Postgres:ConnectionString"] = "Host=dummy;Database=dummy;Username=dummy;Password=dummy",
         ["Gemini:ApiKey"] = "dummy-gemini-key",
         ["Llm:BaseUrl"] = "http://localhost:20128/v1",
@@ -59,6 +61,50 @@ public class ProgramValidationTests
 
         var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
         Assert.Contains("GroupChatJids", exception.Message);
+    }
+
+    [Fact]
+    public void ValidateRequiredConfig_MissingScoringTemplates_Throws()
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent);
+        values.Remove("JobLens:ScoringTemplates:0:Name");
+        values.Remove("JobLens:ScoringTemplates:0:Profile");
+        var config = BuildConfig(values);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
+        Assert.Contains("ScoringTemplates", exception.Message);
+    }
+
+
+    [Theory]
+    [InlineData("Name")]
+    [InlineData("Profile")]
+    public void ValidateRequiredConfig_BlankScoringTemplateField_Throws(string field)
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            [$"JobLens:ScoringTemplates:0:{field}"] = "   ",
+        };
+        var config = BuildConfig(values);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Contains("non-empty Name and Profile", exception.Message);
+    }
+
+    [Fact]
+    public void ValidateRequiredConfig_DuplicateScoringTemplateNames_Throws()
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            ["JobLens:ScoringTemplates:1:Name"] = " general ",
+            ["JobLens:ScoringTemplates:1:Profile"] = "another profile",
+        };
+        var config = BuildConfig(values);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Contains("names must be unique", exception.Message);
     }
 
     [Theory]
