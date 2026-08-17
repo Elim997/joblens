@@ -13,4 +13,9 @@ public class JobLensOptions
 
     public int ScoringTopK { get; set; } = 40;
     public int MatchThreshold { get; set; } = 70;
+
+    // A posting scoring at or above this threshold gets a TailoredDraft created automatically
+    // during /run (via TailoredDraftService, the same path POST /tailor uses) - never exported
+    // to Rezi automatically. Must be >= MatchThreshold; see Program.ValidateRequiredConfig.
+    public int AutoTailorThreshold { get; set; } = 80;
 }

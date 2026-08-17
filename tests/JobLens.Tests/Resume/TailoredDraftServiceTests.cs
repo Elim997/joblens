@@ -74,17 +74,19 @@ public class TailoredDraftServiceTests
         var result = await service.CreateOrGetAsync(MessageId);
 
         Assert.NotNull(result);
-        Assert.Equal(MessageId, result.MessageId);
-        Assert.Equal(93, result.Score);
-        Assert.Equal($"  {TemplateName.ToUpperInvariant()}  ", result.SelectedTemplate);
-        Assert.Equal(BaseId, result.BaseResumeId);
-        Assert.Equal(TemplateName, result.BaseResumeName);
-        Assert.Equal(tailored.Summary, result.Summary);
-        Assert.Equal(tailored.Experience, result.Experience);
-        Assert.Equal(tailored.Skills, result.Skills);
-        Assert.Equal(tailored.RewriteRationale, result.RewriteRationale);
-        Assert.Equal(TailoredDraftStatus.Draft, result.Status);
-        Assert.Null(result.ExportedAt);
+        Assert.True(result.WasCreated);
+        var draft = result.Draft;
+        Assert.Equal(MessageId, draft.MessageId);
+        Assert.Equal(93, draft.Score);
+        Assert.Equal($"  {TemplateName.ToUpperInvariant()}  ", draft.SelectedTemplate);
+        Assert.Equal(BaseId, draft.BaseResumeId);
+        Assert.Equal(TemplateName, draft.BaseResumeName);
+        Assert.Equal(tailored.Summary, draft.Summary);
+        Assert.Equal(tailored.Experience, draft.Experience);
+        Assert.Equal(tailored.Skills, draft.Skills);
+        Assert.Equal(tailored.RewriteRationale, draft.RewriteRationale);
+        Assert.Equal(TailoredDraftStatus.Draft, draft.Status);
+        Assert.Null(draft.ExportedAt);
         Assert.Equal(BaseId, tailor.LastBaseResumeId);
         Assert.Equal(TemplateName, tailor.LastBaseResumeName);
         Assert.Equal(1, tailor.CallCount);
@@ -123,7 +125,9 @@ public class TailoredDraftServiceTests
 
         var result = await service.CreateOrGetAsync(MessageId);
 
-        Assert.Same(existing, result);
+        Assert.NotNull(result);
+        Assert.Same(existing, result.Draft);
+        Assert.False(result.WasCreated);
         Assert.Equal(0, tailor.CallCount);
         Assert.Equal(0, store.CreateOrGetCallCount);
         Assert.Single(store.Drafts);

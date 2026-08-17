@@ -1,19 +1,37 @@
 using JobLens.Core.Configuration;
 using JobLens.Core.Notification;
 using JobLens.Core.Parsing;
+using JobLens.Core.Resume;
 using JobLens.Core.Scoring;
 using JobLens.Core.Storage;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace JobLens.Core.Pipeline;
 
 /// <param name="Batches">How many scoring calls were made - each one bounded internally by
 /// IRelevanceScorer's own ScoringTopK cutoff, never re-sliced by PipelineRunner.</param>
+/// <param name="DraftsCreated">Postings scored >= AutoTailorThreshold this run for which a new
+/// TailoredDraft was actually persisted (a tailoring-model call ran).</param>
+/// <param name="DraftsReused">Postings scored >= AutoTailorThreshold this run for which an
+/// existing TailoredDraft was found and returned - no model call, no new row.</param>
+/// <param name="TailoringFailures">Postings scored >= AutoTailorThreshold this run whose
+/// automatic draft creation failed (model, Rezi-read, or validation failure). The posting's
+/// score/match is still persisted and notified; only its draft is missing.</param>
 /// <param name="StoppedEarly">True if the loop stopped before the backlog was fully drained
 /// because a batch returned zero usable scores, rather than looping forever on an
 /// unscoreable remainder.</param>
 /// <param name="StopReason">Human-readable reason when StoppedEarly is true; null otherwise.</param>
-public record RunSummary(int Batches, int Scored, int Matched, int Notified, bool StoppedEarly, string? StopReason);
+public record RunSummary(
+    int Batches,
+    int Scored,
+    int Matched,
+    int Notified,
+    int DraftsCreated,
+    int DraftsReused,
+    int TailoringFailures,
+    bool StoppedEarly,
+    string? StopReason);
 
 /// <summary>
 /// The "score my whole archive" loop: repeatedly routes and ranks every still-unscored
@@ -26,12 +44,21 @@ public record RunSummary(int Batches, int Scored, int Matched, int Notified, boo
 /// unscoreable remainder forever. Notifications are deduped across the *entire* run, not
 /// just within one batch, so a repost that lands in a later batch than its duplicate is
 /// never notified twice.
+///
+/// Postings scoring >= AutoTailorThreshold also get a TailoredDraft automatically created (or
+/// reused) via TailoredDraftService - the same path POST /tailor uses, never duplicated here.
+/// This never writes to Rezi (TailoredDraftService has no dependency on IResumeTailor's
+/// upstream Rezi client's write path or on TailoredDraftExporter) and is fail-soft at the run
+/// level: a single posting's tailoring failure is logged and counted, but never discards that
+/// posting's already-persisted score/match or stops the rest of the run.
 /// </summary>
 public class PipelineRunner(
     IDatastore datastore,
     IRelevanceScorer scorer,
     INotifier notifier,
-    IOptions<JobLensOptions> options)
+    TailoredDraftService draftService,
+    IOptions<JobLensOptions> options,
+    ILogger<PipelineRunner> logger)
 {
     public async Task<RunSummary> RunAsync(CancellationToken cancellationToken = default)
     {
@@ -39,6 +66,9 @@ public class PipelineRunner(
         var totalScored = 0;
         var totalMatched = 0;
         var totalNotified = 0;
+        var totalDraftsCreated = 0;
+        var totalDraftsReused = 0;
+        var totalTailoringFailures = 0;
         var stoppedEarly = false;
         string? stopReason = null;
 
@@ -99,8 +129,48 @@ public class PipelineRunner(
                 cancellationToken);
 
             totalScored += scored.Count;
+
+            // Automatic drafting: every posting >= AutoTailorThreshold in this batch, not just
+            // the notification-deduped toNotify subset - draft eligibility is a per-posting
+            // score threshold, independent of cross-run notification dedup. Runs after
+            // MarkScoredAsync because TailoredDraftService requires the posting's score/template
+            // to already be persisted. Fail-soft: one posting's tailoring failure is logged and
+            // counted, never discards its already-persisted score/match, and never stops the
+            // rest of this batch or run - except for cancellation, which always propagates.
+            foreach (var match in matches.Where(m => m.Score >= options.Value.AutoTailorThreshold))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    var result = await draftService.CreateOrGetAsync(match.Id, cancellationToken);
+                    if (result is null)
+                        continue; // Not expected (just scored), but not a failure either.
+
+                    if (result.WasCreated)
+                        totalDraftsCreated++;
+                    else
+                        totalDraftsReused++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    totalTailoringFailures++;
+                    logger.LogWarning(
+                        ex,
+                        "Automatic tailoring failed for messageId {MessageId}; its score/match is already persisted.",
+                        match.Id);
+                }
+            }
         }
 
-        return new RunSummary(batches, totalScored, totalMatched, totalNotified, stoppedEarly, stopReason);
+        return new RunSummary(
+            batches,
+            totalScored,
+            totalMatched,
+            totalNotified,
+            totalDraftsCreated,
+            totalDraftsReused,
+            totalTailoringFailures,
+            stoppedEarly,
+            stopReason);
     }
 }

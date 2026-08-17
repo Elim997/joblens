@@ -11,10 +11,17 @@ public class FakeResumeTailor : IResumeTailor
 {
     private readonly ValidatedTailoredResume? _result;
     private readonly Exception? _exception;
+    private readonly Func<JobPosting, ValidatedTailoredResume>? _resultFactory;
 
     public FakeResumeTailor(ValidatedTailoredResume result) => _result = result;
 
     public FakeResumeTailor(Exception exception) => _exception = exception;
+
+    // Per-posting success/failure branching: lets a single test make tailoring succeed for some
+    // postings and throw for others (e.g. one strong match's auto-tailor fails while another's
+    // succeeds in the same /run) without touching the two constructors/call sites above.
+    public FakeResumeTailor(Func<JobPosting, ValidatedTailoredResume> resultFactory) =>
+        _resultFactory = resultFactory;
 
     public JobPosting? LastPosting { get; private set; }
 
@@ -38,6 +45,9 @@ public class FakeResumeTailor : IResumeTailor
 
         if (_exception is not null)
             throw _exception;
+
+        if (_resultFactory is not null)
+            return Task.FromResult(_resultFactory(posting));
 
         return Task.FromResult(_result!);
     }

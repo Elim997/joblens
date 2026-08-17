@@ -1,23 +1,71 @@
 using JobLens.Core.Configuration;
 using JobLens.Core.Parsing;
 using JobLens.Core.Pipeline;
+using JobLens.Core.Resume;
 using JobLens.Core.Scoring;
+using JobLens.Core.Storage;
+using JobLens.Tests.Resume;
+using JobLens.Tests.Storage;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace JobLens.Tests.Pipeline;
 
 public class PipelineRunnerTests
 {
+    // One configured base resume, "General", matching every test's FakeRelevanceScorer output
+    // TemplateName below - the same 1:1 template/base-name convention TailoredDraftService
+    // enforces in production.
+    private const string BaseResumeId = "base-general";
+    private const string TemplateName = "General";
+
     private static JobPosting MakePosting(string title) =>
         new(title, "Acme", "Tel Aviv", "Software", $"https://example.com/{title}", "- test requirement");
 
     private static JobPosting MakePosting(string title, string company, string applyUrl) =>
         new(title, company, "Tel Aviv", "Software", applyUrl, "- test requirement");
 
+    private static ValidatedTailoredResume MakeTailored() =>
+        new(
+            new BaseSelection(BaseResumeId, TemplateName, "Selected from persisted scoring metadata."),
+            "Summary.",
+            [new TailoredExperienceItem("exp-1", "Experience.")],
+            [new TailoredSkillItem("skill-1", "Skill.")],
+            "Rationale.",
+            ["exp-1"],
+            ["skill-1"]);
+
+    // autoTailorThreshold defaults to 91 - just above every score used by the pre-Milestone-E
+    // tests below (max 90) - so those tests exercise zero auto-tailoring unless a test opts in
+    // with its own lower threshold. tailor/draftStore default to a real TailoredDraftService
+    // wired the same way production DI wires it, using FakeResumeTailor/FakeTailoredDraftStore
+    // test doubles; a tailor that throws if called is the default so any test that accidentally
+    // triggers auto-tailoring fails loudly instead of silently passing.
     private static PipelineRunner CreateRunner(
-        FakeDatastore datastore, FakeRelevanceScorer scorer, FakeNotifier notifier, int matchThreshold = 70) =>
-        new(datastore, scorer, notifier,
-            Options.Create(new JobLensOptions { MatchThreshold = matchThreshold }));
+        FakeDatastore datastore,
+        FakeRelevanceScorer scorer,
+        FakeNotifier notifier,
+        int matchThreshold = 70,
+        int autoTailorThreshold = 91,
+        FakeResumeTailor? tailor = null,
+        FakeTailoredDraftStore? draftStore = null)
+    {
+        tailor ??= new FakeResumeTailor(new InvalidOperationException("Auto-tailoring should not run in this test."));
+        draftStore ??= new FakeTailoredDraftStore();
+        var reziOptions = Options.Create(new ReziOptions
+        {
+            BaseResumes = [new BaseResumeConfig { Id = BaseResumeId, Name = TemplateName }],
+        });
+        var draftService = new TailoredDraftService(datastore, tailor, draftStore, reziOptions);
+
+        return new PipelineRunner(
+            datastore,
+            scorer,
+            notifier,
+            draftService,
+            Options.Create(new JobLensOptions { MatchThreshold = matchThreshold, AutoTailorThreshold = autoTailorThreshold }),
+            NullLogger<PipelineRunner>.Instance);
+    }
 
     [Fact]
     public async Task RunAsync_ScoresAll_NotifiesOnlyAtOrAboveThreshold_MarksEveryScoredPosting()
@@ -33,7 +81,9 @@ public class PipelineRunnerTests
 
         var summary = await runner.RunAsync();
 
-        Assert.Equal(new RunSummary(Batches: 1, Scored: 2, Matched: 1, Notified: 1, StoppedEarly: false, StopReason: null), summary);
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 2, Matched: 1, Notified: 1, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
         Assert.Single(notifier.Calls);
         Assert.Equal("High Score", notifier.Calls[0].Single().Posting.Title);
         // Both postings were scored (matched or not), so both are marked - the
@@ -60,7 +110,9 @@ public class PipelineRunnerTests
 
         var summary = await runner.RunAsync();
 
-        Assert.Equal(new RunSummary(Batches: 1, Scored: 1, Matched: 1, Notified: 1, StoppedEarly: false, StopReason: null), summary);
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 1, Matched: 1, Notified: 1, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
     }
 
     [Fact]
@@ -73,7 +125,9 @@ public class PipelineRunnerTests
 
         var summary = await runner.RunAsync();
 
-        Assert.Equal(new RunSummary(Batches: 0, Scored: 0, Matched: 0, Notified: 0, StoppedEarly: false, StopReason: null), summary);
+        Assert.Equal(
+            new RunSummary(Batches: 0, Scored: 0, Matched: 0, Notified: 0, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
         Assert.Empty(scorer.Calls);
         Assert.Empty(notifier.Calls);
     }
@@ -97,6 +151,9 @@ public class PipelineRunnerTests
         Assert.Equal(0, summary.Scored);
         Assert.Equal(0, summary.Matched);
         Assert.Equal(0, summary.Notified);
+        Assert.Equal(0, summary.DraftsCreated);
+        Assert.Equal(0, summary.DraftsReused);
+        Assert.Equal(0, summary.TailoringFailures);
         Assert.True(summary.StoppedEarly);
         Assert.False(string.IsNullOrWhiteSpace(summary.StopReason));
         Assert.Empty(notifier.Calls);
@@ -138,6 +195,9 @@ public class PipelineRunnerTests
         Assert.Equal(1, summary.Scored);
         Assert.Equal(1, summary.Matched);
         Assert.Equal(1, summary.Notified);
+        Assert.Equal(0, summary.DraftsCreated);
+        Assert.Equal(0, summary.DraftsReused);
+        Assert.Equal(0, summary.TailoringFailures);
         Assert.True(summary.StoppedEarly);
         Assert.False(string.IsNullOrWhiteSpace(summary.StopReason));
 
@@ -170,7 +230,9 @@ public class PipelineRunnerTests
 
         var summary = await runner.RunAsync();
 
-        Assert.Equal(new RunSummary(Batches: 3, Scored: 5, Matched: 5, Notified: 5, StoppedEarly: false, StopReason: null), summary);
+        Assert.Equal(
+            new RunSummary(Batches: 3, Scored: 5, Matched: 5, Notified: 5, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
         Assert.Equal(3, scorer.Calls.Count);
         // Each call's input is the whole remaining backlog - 5, then 3, then 1 - shrinking
         // as MarkScoredAsync removes what the prior batch scored.
@@ -203,7 +265,9 @@ public class PipelineRunnerTests
 
         var summary = await runner.RunAsync();
 
-        Assert.Equal(new RunSummary(Batches: 2, Scored: 3, Matched: 3, Notified: 3, StoppedEarly: false, StopReason: null), summary);
+        Assert.Equal(
+            new RunSummary(Batches: 2, Scored: 3, Matched: 3, Notified: 3, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
         Assert.Equal(2, scorer.Calls.Count);
         Assert.Equal(3, scorer.Calls[0].Count);
         Assert.Single(scorer.Calls[1]);
@@ -262,7 +326,9 @@ public class PipelineRunnerTests
 
         var summary = await runner.RunAsync();
 
-        Assert.Equal(new RunSummary(Batches: 2, Scored: 3, Matched: 3, Notified: 2, StoppedEarly: false, StopReason: null), summary);
+        Assert.Equal(
+            new RunSummary(Batches: 2, Scored: 3, Matched: 3, Notified: 2, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
 
         // Across both notifier calls combined, the shared-URL job appears exactly once.
         var allNotified = notifier.Calls.SelectMany(c => c).ToList();
@@ -283,16 +349,329 @@ public class PipelineRunnerTests
         var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70);
 
         var firstRun = await runner.RunAsync();
-        Assert.Equal(new RunSummary(Batches: 1, Scored: 2, Matched: 2, Notified: 2, StoppedEarly: false, StopReason: null), firstRun);
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 2, Matched: 2, Notified: 2, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            firstRun);
         Assert.Equal(2, notifier.Calls[0].Count);
 
         var secondRun = await runner.RunAsync();
 
-        Assert.Equal(new RunSummary(Batches: 0, Scored: 0, Matched: 0, Notified: 0, StoppedEarly: false, StopReason: null), secondRun);
+        Assert.Equal(
+            new RunSummary(Batches: 0, Scored: 0, Matched: 0, Notified: 0, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            secondRun);
         // Both postings are already marked scored, so the second run finds nothing
         // unscored and returns before ever calling the scorer or notifier again -
         // nothing from run one gets re-scored or re-notified.
         Assert.Single(scorer.Calls);
         Assert.Single(notifier.Calls);
+    }
+
+    // ---- Milestone E: AutoTailorThreshold / automatic TailoredDraft creation ----
+
+    [Fact]
+    public async Task RunAsync_ScoreBelowMatchThreshold_NoMatchNoDraft()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Below Match"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 50, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(new InvalidOperationException("must not be called"));
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 1, Matched: 0, Notified: 0, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Equal(0, tailor.CallCount);
+    }
+
+    [Fact]
+    public async Task RunAsync_ScoreBetweenMatchAndAutoTailorThreshold_MatchesButDoesNotDraft()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Mid Score"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 75, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(new InvalidOperationException("must not be called"));
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 1, Matched: 1, Notified: 1, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Equal(0, tailor.CallCount);
+    }
+
+    [Fact]
+    public async Task RunAsync_ScoreExactlyAtAutoTailorThreshold_CreatesDraft()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Exactly At Auto Threshold"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 80, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var draftStore = new FakeTailoredDraftStore();
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 1, Matched: 1, Notified: 1, DraftsCreated: 1, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Equal(1, tailor.CallCount);
+        Assert.Single(draftStore.Drafts);
+        Assert.Equal("id-1", draftStore.Drafts[0].MessageId);
+    }
+
+    [Fact]
+    public async Task RunAsync_ScoreAboveAutoTailorThreshold_CreatesDraft()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Above Auto Threshold"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 95, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var draftStore = new FakeTailoredDraftStore();
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 1, Matched: 1, Notified: 1, DraftsCreated: 1, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Single(draftStore.Drafts);
+    }
+
+    [Fact]
+    public async Task RunAsync_ExistingDraftForQualifyingPosting_ReusesWithoutModelCall()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Already Drafted"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(new InvalidOperationException("must not be called"));
+        var draftStore = new FakeTailoredDraftStore();
+        draftStore.Seed(new TailoredDraft(
+            "existing-draft",
+            "id-1",
+            90,
+            TemplateName,
+            BaseResumeId,
+            TemplateName,
+            "Existing summary.",
+            [new TailoredExperienceItem("exp-1", "Existing experience.")],
+            [new TailoredSkillItem("skill-1", "Existing skill.")],
+            "Existing rationale.",
+            TailoredDraftStatus.Draft,
+            DateTimeOffset.UtcNow,
+            null));
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 1, Matched: 1, Notified: 1, DraftsCreated: 0, DraftsReused: 1, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Equal(0, tailor.CallCount);
+        Assert.Single(draftStore.Drafts);
+    }
+
+    [Fact]
+    public async Task RunAsync_MultipleQualifyingPostings_CreatesIndependentDrafts()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("A"), [1f, 0f, 0f]);
+        datastore.Seed("id-2", MakePosting("B"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var draftStore = new FakeTailoredDraftStore();
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 2, Matched: 2, Notified: 2, DraftsCreated: 2, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Equal(2, tailor.CallCount);
+        Assert.Equal(["id-1", "id-2"], draftStore.Drafts.Select(d => d.MessageId).OrderBy(id => id));
+    }
+
+    [Fact]
+    public async Task RunAsync_OneTailoringFailure_DoesNotLosePersistedScoreOrBlockOtherDrafts()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Fails"), [1f, 0f, 0f]);
+        datastore.Seed("id-2", MakePosting("Succeeds"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(posting =>
+            posting.Title == "Fails"
+                ? throw new TailoringModelUnavailableException("Model unavailable.")
+                : MakeTailored());
+        var draftStore = new FakeTailoredDraftStore();
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 2, Matched: 2, Notified: 2, DraftsCreated: 1, DraftsReused: 0, TailoringFailures: 1, StoppedEarly: false, StopReason: null),
+            summary);
+        // Both postings' scores/matches are persisted regardless of the tailoring outcome.
+        Assert.Equal(["id-1", "id-2"], datastore.ScoredMessageIds.OrderBy(id => id));
+        Assert.Single(draftStore.Drafts);
+        Assert.Equal("id-2", draftStore.Drafts[0].MessageId);
+    }
+
+    [Fact]
+    public async Task RunAsync_TailoringValidationFailure_PersistsNoDraftAndCountsAsFailure()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Malformed"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        // originalSkillItemIds references "skill-1", which doesn't exist among the produced
+        // skill items ("invented") - ResumeTailoringValidator.ValidateComplete rejects this.
+        var malformed = new ValidatedTailoredResume(
+            new BaseSelection(BaseResumeId, TemplateName, "Trusted mapping."),
+            "Summary.",
+            [new TailoredExperienceItem("exp-1", "Valid text.")],
+            [new TailoredSkillItem("invented", "Invented item.")],
+            "Rationale.",
+            ["exp-1"],
+            ["skill-1"]);
+        var tailor = new FakeResumeTailor(malformed);
+        var draftStore = new FakeTailoredDraftStore();
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 1, Matched: 1, Notified: 1, DraftsCreated: 0, DraftsReused: 0, TailoringFailures: 1, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Empty(draftStore.Drafts);
+        Assert.Equal(["id-1"], datastore.ScoredMessageIds);
+    }
+
+    [Fact]
+    public async Task RunAsync_ReziReadFailureForOneJob_IsFailSoftAndDoesNotBlockOtherDrafts()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("ReziFails"), [1f, 0f, 0f]);
+        datastore.Seed("id-2", MakePosting("Succeeds"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(posting =>
+            posting.Title == "ReziFails"
+                ? throw new ReziToolCallException("read_resume", "Rezi read failed.")
+                : MakeTailored());
+        var draftStore = new FakeTailoredDraftStore();
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 1, Scored: 2, Matched: 2, Notified: 2, DraftsCreated: 1, DraftsReused: 0, TailoringFailures: 1, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Single(draftStore.Drafts);
+        Assert.Equal("id-2", draftStore.Drafts[0].MessageId);
+    }
+
+    [Fact]
+    public async Task RunAsync_CancelledDuringAutoTailorLoop_PropagatesAndSkipsRemainingPostings()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("First"), [1f, 0f, 0f]);
+        datastore.Seed("id-2", MakePosting("Second"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        using var cts = new CancellationTokenSource();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var draftStore = new FakeTailoredDraftStore();
+        // Cancel only once the first posting's draft has actually been persisted, so
+        // cancellation lands cleanly at the top of the *next* loop iteration - not mid-call,
+        // which would make FakeTailoredDraftStore's own cancellation check abort id-1's own
+        // (still in-flight) persistence too.
+        draftStore.AfterCreateOrGet = draft =>
+        {
+            if (draft.MessageId == "id-1")
+                cts.Cancel();
+        };
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runner.RunAsync(cts.Token));
+
+        // Only the first posting's draft attempt ran before cancellation was observed at the
+        // top of the next loop iteration; the fail-soft catch block explicitly excludes
+        // OperationCanceledException, so this must propagate rather than be swallowed/counted.
+        Assert.Equal(1, tailor.CallCount);
+        Assert.Single(draftStore.Drafts);
+        Assert.Equal("id-1", draftStore.Drafts[0].MessageId);
+    }
+
+    [Fact]
+    public async Task RunAsync_MultipleBatches_DraftCountersAccumulateAcrossBatches()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("A"), [1f, 0f, 0f]);
+        datastore.Seed("id-2", MakePosting("B"), [1f, 0f, 0f]);
+        datastore.Seed("id-3", MakePosting("C"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Take(2).Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var draftStore = new FakeTailoredDraftStore();
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor, draftStore: draftStore);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(
+            new RunSummary(Batches: 2, Scored: 3, Matched: 3, Notified: 3, DraftsCreated: 3, DraftsReused: 0, TailoringFailures: 0, StoppedEarly: false, StopReason: null),
+            summary);
+        Assert.Equal(3, draftStore.Drafts.Count);
+    }
+
+    [Fact]
+    public async Task RunAsync_AutoTailoring_DoesNotChangeNotificationBehavior()
+    {
+        // Draft creation runs entirely after notifier.NotifyAsync is called and never calls
+        // the notifier itself - a created draft must not add or duplicate a notification.
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("A"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", "General")).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var runner = CreateRunner(datastore, scorer, notifier, matchThreshold: 70, autoTailorThreshold: 80, tailor: tailor);
+
+        var summary = await runner.RunAsync();
+
+        Assert.Equal(1, summary.Notified);
+        Assert.Single(notifier.Calls);
+        Assert.Single(notifier.Calls[0]);
     }
 }

@@ -151,4 +151,65 @@ public class ProgramValidationTests
 
         Assert.Null(exception);
     }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("101")]
+    public void ValidateRequiredConfig_AutoTailorThresholdOutOfRange_Throws(string autoTailorThreshold)
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            ["JobLens:AutoTailorThreshold"] = autoTailorThreshold,
+        };
+        var config = BuildConfig(values);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Contains("AutoTailorThreshold", exception.Message);
+        Assert.Contains("between 0 and 100", exception.Message);
+    }
+
+    [Fact]
+    public void ValidateRequiredConfig_AutoTailorThresholdBelowMatchThreshold_Throws()
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            ["JobLens:MatchThreshold"] = "70",
+            ["JobLens:AutoTailorThreshold"] = "60",
+        };
+        var config = BuildConfig(values);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Contains("AutoTailorThreshold", exception.Message);
+        Assert.Contains("MatchThreshold", exception.Message);
+    }
+
+    [Fact]
+    public void ValidateRequiredConfig_AutoTailorThresholdEqualsMatchThreshold_DoesNotThrow()
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            ["JobLens:MatchThreshold"] = "70",
+            ["JobLens:AutoTailorThreshold"] = "70",
+        };
+        var config = BuildConfig(values);
+
+        var exception = Record.Exception(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void ValidateRequiredConfig_NoExplicitThresholds_UsesDefaultsAndDoesNotThrow()
+    {
+        // JobLensOptions defaults MatchThreshold to 70 and AutoTailorThreshold to 80 - neither
+        // key is set here, so this proves the default pair is itself valid (>= 0, <= 100, and
+        // AutoTailorThreshold >= MatchThreshold) without relying on appsettings.json.
+        var config = BuildConfig(AllRequiredSettingsPresent);
+
+        var exception = Record.Exception(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Null(exception);
+    }
 }

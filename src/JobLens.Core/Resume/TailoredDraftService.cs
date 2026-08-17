@@ -20,7 +20,7 @@ public class TailoredDraftService(
     IOptions<ReziOptions> options)
 {
     /// <summary>Null means no stored posting for messageId - the caller turns that into a 404.</summary>
-    public async Task<TailoredDraft?> CreateOrGetAsync(string messageId, CancellationToken cancellationToken = default)
+    public async Task<TailoredDraftResult?> CreateOrGetAsync(string messageId, CancellationToken cancellationToken = default)
     {
         var snapshot = await datastore.GetScoredPostingByMessageIdAsync(messageId, cancellationToken);
         if (snapshot is null)
@@ -39,7 +39,7 @@ public class TailoredDraftService(
         // another tailoring call or creates a duplicate row.
         var existing = await draftStore.FindAsync(messageId, selectedTemplate, baseResumeId, cancellationToken);
         if (existing is not null)
-            return existing;
+            return new TailoredDraftResult(existing, WasCreated: false);
 
         var tailored = await tailor.TailorAsync(snapshot.Posting, baseResumeId, baseResumeName, cancellationToken);
 
@@ -61,7 +61,11 @@ public class TailoredDraftService(
         // CreateOrGetAsync is itself idempotent at the database level (see
         // PgvectorTailoredDraftStore), so a concurrent duplicate request that raced past the
         // FindAsync check above still converges on a single row here, without a second write.
-        return await draftStore.CreateOrGetAsync(newDraft, cancellationToken);
+        // In that rare race the row already existed at the DB layer, but WasCreated is still
+        // reported true here - acceptable imprecision for a metrics counter: TailorAsync
+        // genuinely ran and FindAsync had reported "not found" moments earlier.
+        var created = await draftStore.CreateOrGetAsync(newDraft, cancellationToken);
+        return new TailoredDraftResult(created, WasCreated: true);
     }
 
     /// <summary>
@@ -82,3 +86,12 @@ public class TailoredDraftService(
         return (match.Id.Trim(), match.Name.Trim());
     }
 }
+
+/// <summary>
+/// CreateOrGetAsync's return shape. WasCreated is false when an existing draft for the
+/// (posting, template, base) tuple was found and reused with zero model calls; true when a
+/// tailoring call actually ran and a new row was persisted. Lets callers (e.g. PipelineRunner's
+/// automatic-tailoring loop) report created-vs-reused counts without duplicating this service's
+/// internal template-resolution/lookup logic.
+/// </summary>
+public record TailoredDraftResult(TailoredDraft Draft, bool WasCreated);

@@ -10,6 +10,11 @@ public class FakeTailoredDraftStore : ITailoredDraftStore
 
     public IReadOnlyList<TailoredDraft> Drafts => _drafts;
 
+    // Fires right after a draft is persisted/reused and returned, but before control returns to
+    // the caller - lets a test simulate cancellation landing cleanly *between* two postings'
+    // auto-tailor iterations (PipelineRunnerTests' cancellation test), rather than mid-call.
+    public Action<TailoredDraft>? AfterCreateOrGet { get; set; }
+
     public void Seed(TailoredDraft draft) => _drafts.Add(draft);
 
     public Task<TailoredDraft> CreateOrGetAsync(
@@ -24,7 +29,10 @@ public class FakeTailoredDraftStore : ITailoredDraftStore
             d.SelectedTemplate == draft.SelectedTemplate &&
             d.BaseResumeId == draft.BaseResumeId);
         if (existing is not null)
+        {
+            AfterCreateOrGet?.Invoke(existing);
             return Task.FromResult(existing);
+        }
 
         var stored = new TailoredDraft(
             Guid.NewGuid().ToString(),
@@ -41,6 +49,7 @@ public class FakeTailoredDraftStore : ITailoredDraftStore
             DateTimeOffset.UtcNow,
             null);
         _drafts.Add(stored);
+        AfterCreateOrGet?.Invoke(stored);
         return Task.FromResult(stored);
     }
 

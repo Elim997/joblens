@@ -190,7 +190,7 @@ running:
 | Endpoint | What it does |
 |---|---|
 | `POST /ingest` | Pulls new WhatsApp messages, parses, category-filters, embeds, and stores them in pgvector. |
-| `POST /run` | Scores every unscored posting in the archive against the profile and notifies matches. |
+| `POST /run` | Scores every unscored posting in the archive against the profile, notifies matches, and automatically creates a persisted `TailoredDraft` (zero Rezi writes) for postings scoring at or above `AutoTailorThreshold`. |
 | `GET /matches` | Stored matches (including `messageId`, score, and reasoning) from past runs; pass that id to `/tailor`. |
 | `GET /query?text=...` | Semantic search over the embedded posting archive. |
 | `POST /tailor?messageId=X` | Creates (or returns the existing) persisted `TailoredDraft` for one scored posting, using the posting's already-persisted scoring template. Zero Rezi writes. |
@@ -256,6 +256,28 @@ surfaces as an error instead of being silently retried.
 None of these responses echo internal model output or the configured Rezi
 resume id back to the caller.
 
+### Automatic drafting for strong matches (`POST /run`)
+
+`JobLens:AutoTailorThreshold` (default `80`, must be within `[0, 100]` and `>=
+JobLens:MatchThreshold` - checked at startup by `Program.ValidateRequiredConfig`)
+adds a third score tier on top of `MatchThreshold`'s existing two:
+
+| Score | Behavior |
+|---|---|
+| `< MatchThreshold` | Score persisted. No match notification. No draft. |
+| `>= MatchThreshold`, `< AutoTailorThreshold` | Score/match persisted, normal notification - unchanged from before. No draft. |
+| `>= AutoTailorThreshold` | Score/match persisted and notified, **and** a `TailoredDraft` is automatically created or reused via the exact same `TailoredDraftService.CreateOrGetAsync` path `POST /tailor` uses - same idempotency, same trusted-template guardrails, same zero-Rezi-writes contract. |
+
+This only ever runs against postings scored in the current `/run` call; it never
+retroactively drafts historical rows just because the threshold changes.
+Automatic tailoring is fail-soft at the run level: a tailoring/model/Rezi-read/
+validation failure for one strong match is logged and counted, but does not
+discard that posting's already-persisted score/match and does not stop scoring
+or drafting other postings in the same run (cancellation still propagates
+immediately). `POST /run`'s response includes `draftsCreated`, `draftsReused`,
+and `tailoringFailures` alongside the existing `batches`/`scored`/`matched`/
+`notified`/`stoppedEarly`/`stopReason` fields.
+
 Relevance scoring is intentionally lower-risk and fail-soft, unlike tailoring:
 an invalid structured response gets one retry, and if it's still invalid that
 batch just returns no scores rather than failing the request. Resume tailoring
@@ -263,7 +285,7 @@ and export are fail-closed instead - any failure anywhere in either chain
 above produces zero writes and no status change, never a partial or
 best-effort one.
 
-217 tests pass (xUnit, non-live/default filter). Four integration test files -
+234 tests pass (xUnit, non-live/default filter). Four integration test files -
 `EvalEndpointIntegrationTests`, `LlmRelevanceScorerIntegrationTests`,
 `PgvectorDatastoreIntegrationTests`, and
 `PgvectorTailoredDraftStoreIntegrationTests` - need a live Postgres (the last

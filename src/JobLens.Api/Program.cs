@@ -230,10 +230,10 @@ app.MapPost("/tailor", async (
 {
     try
     {
-        var draft = await service.CreateOrGetAsync(messageId, cancellationToken);
-        return draft is null
+        var result = await service.CreateOrGetAsync(messageId, cancellationToken);
+        return result is null
             ? Results.NotFound(new { error = $"No stored posting found for messageId '{messageId}'." })
-            : Results.Ok(draft);
+            : Results.Ok(result.Draft);
     }
     catch (PostingNotScoredException ex)
     {
@@ -348,6 +348,25 @@ public partial class Program
             scoringTemplates.Length)
         {
             throw new InvalidOperationException("JobLens:ScoringTemplates names must be unique");
+        }
+
+        // AutoTailorThreshold gates automatic TailoredDraft creation during /run (Milestone E).
+        // It must sit within the valid 0-100 score range and at or above MatchThreshold - below
+        // that, /run would auto-tailor postings that never even reached match status, which
+        // contradicts the three-tier score contract, so this fails startup instead of warning.
+        var defaults = new JobLensOptions();
+        var matchThreshold = config.GetValue("JobLens:MatchThreshold", defaults.MatchThreshold);
+        var autoTailorThreshold = config.GetValue("JobLens:AutoTailorThreshold", defaults.AutoTailorThreshold);
+
+        if (autoTailorThreshold < 0 || autoTailorThreshold > 100)
+        {
+            throw new InvalidOperationException(
+                "JobLens:AutoTailorThreshold must be between 0 and 100 (the valid relevance score range)");
+        }
+        if (autoTailorThreshold < matchThreshold)
+        {
+            throw new InvalidOperationException(
+                "JobLens:AutoTailorThreshold must be greater than or equal to JobLens:MatchThreshold");
         }
 
         if (string.IsNullOrWhiteSpace(config["Postgres:ConnectionString"]))
