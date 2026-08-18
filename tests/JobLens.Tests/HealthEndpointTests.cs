@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 
@@ -39,6 +40,23 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("\"status\":\"ok\"", body);
+    }
+
+    // Milestone F1: /health now also reports BuildInfo.Marker so a stale published binary is
+    // detectable from this endpoint alone. Parses the body rather than substring-matching, since
+    // the marker's actual value (informational version, optionally +<commit-sha>) is
+    // machine/build-dependent and shouldn't be hardcoded in a test.
+    [Fact]
+    public async Task Health_IncludesNonEmptyBuildMarker()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/health");
+
+        var body = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(body);
+        Assert.True(document.RootElement.TryGetProperty("build", out var build));
+        Assert.False(string.IsNullOrWhiteSpace(build.GetString()));
     }
 
     // Proves this whole test class is genuinely hermetic, not passing by accident

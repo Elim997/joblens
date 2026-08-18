@@ -17,4 +17,27 @@
     <ProjectReference Include="..\JobLens.Core\JobLens.Core.csproj" />
   </ItemGroup>
 
+  <!-- Milestone F1 build marker: stamps AssemblyInformationalVersion with "+<short-sha>" via the
+       SDK's built-in SourceRevisionId mechanism (IncludeSourceRevisionInInformationalVersion
+       defaults to true - no SourceLink package needed). Runs before GenerateAssemblyInfo so the
+       property is set in time to be picked up; falls back to "unknown" rather than failing the
+       build when git isn't available (e.g. a source archive with no .git folder) or errors out.
+       See JobLens.Core.Diagnostics.BuildInfo, which reads the resulting
+       AssemblyInformationalVersion at runtime. -->
+  <Target Name="SetSourceRevisionIdFromGit" BeforeTargets="GenerateAssemblyInfo" Condition="'$(SourceRevisionId)' == ''">
+    <Exec Command="git rev-parse --short HEAD"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          ContinueOnError="WarnAndContinue"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitShortSha" />
+      <Output TaskParameter="ExitCode" PropertyName="_GitRevParseExitCode" />
+    </Exec>
+    <PropertyGroup>
+      <SourceRevisionId Condition="'$(_GitRevParseExitCode)' == '0' AND '$(_GitShortSha)' != ''">$(_GitShortSha)</SourceRevisionId>
+      <SourceRevisionId Condition="'$(SourceRevisionId)' == ''">unknown</SourceRevisionId>
+    </PropertyGroup>
+  </Target>
+
 </Project>

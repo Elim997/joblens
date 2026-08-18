@@ -1,4 +1,5 @@
 using JobLens.Core.Configuration;
+using JobLens.Core.Diagnostics;
 using JobLens.Core.Embedding;
 using JobLens.Core.Eval;
 using JobLens.Core.Feed;
@@ -10,6 +11,8 @@ using JobLens.Core.Resume;
 using JobLens.Core.Scoring;
 using JobLens.Core.Storage;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration.EnvironmentVariables; // for EnvironmentVariablesConfigurationSource
+using Microsoft.Extensions.Configuration.Json;                 // for JsonConfigurationSource
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Authentication;
 using Npgsql;
@@ -18,6 +21,14 @@ using Pgvector;            // for UseVector()
 using System.ClientModel;  // for ApiKeyCredential
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Milestone F1: load user-secrets in every environment, not just Development - a Task
+// Scheduler-launched process runs Production unless told otherwise, and CreateBuilder only
+// registers user-secrets implicitly when the environment is Development. Must run before
+// anything reads builder.Configuration. See Program.InsertUserSecretsBeforeEnvironmentVariables
+// for why this can't just be a naive AddUserSecrets<Program>() append.
+Program.InsertUserSecretsBeforeEnvironmentVariables(builder.Configuration);
+
 var config = builder.Configuration;
 
 // JobLens config: MessagesDbPath + GroupChatJids come from user-secrets (identifying),
@@ -104,6 +115,18 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
+// Milestone F1: log the build marker and which configuration providers actually loaded -
+// names and load status only, never a key or value - before validation, so a validation
+// failure at a Task-Scheduler-launched process is still accompanied by a record of exactly
+// what config sources were seen. See BuildInfo and Program.DescribeConfigurationSources.
+var startupLogger = app.Services.GetRequiredService<ILogger<Program>>();
+startupLogger.LogInformation("JobLens build {Build}", BuildInfo.Marker);
+foreach (var source in Program.DescribeConfigurationSources((IConfigurationRoot)app.Configuration))
+{
+    startupLogger.LogInformation(
+        "Config source: {Provider} loaded={Loaded}", source.ProviderName, source.Loaded);
+}
+
 // Fail fast on missing required config. Runs against app.Configuration - the fully
 // built configuration - rather than the pre-Build builder.Configuration, so a test
 // host's config overrides (only merged in during Build()) are visible here. See
@@ -115,7 +138,7 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/health", () => Results.Ok(new { status = "ok", build = BuildInfo.Marker }));
 
 // Runs Feed -> Parse -> category filter -> Embed -> Store for every message currently
 // in the bridge's messages.db. Already-stored message ids are skipped before embedding
@@ -401,4 +424,131 @@ public partial class Program
                 "Llm:TailoringModel must be a dedicated model, not the scoring fallback combo");
         }
     }
+
+    /// <summary>
+    /// Ensures exactly one source matching <paramref name="isTargetSource"/> is present in
+    /// <paramref name="sources"/>, positioned immediately before the LAST
+    /// EnvironmentVariablesConfigurationSource in the list - repositioning an existing match if
+    /// one is present, or invoking <paramref name="addSource"/> to add one if not. This is the
+    /// shared, generic core behind InsertUserSecretsBeforeEnvironmentVariables: both the real
+    /// user-secrets fix and its hermetic value-precedence test (which substitutes in-memory
+    /// stand-ins, since neither a real secrets.json file nor mutating real process environment
+    /// variables is needed to prove resolution precedence) exercise this identical algorithm,
+    /// rather than two independently-written copies of it.
+    ///
+    /// The pivot is deliberately the LAST occurrence, not "the only one" - a real, standalone
+    /// WebApplication.CreateBuilder(args) (production, and ProgramConfigurationTests' own
+    /// structural test) only ever has one, so first/last are the same source there. But under
+    /// WebApplicationFactory&lt;Program&gt; (every integration test in this project),
+    /// HostFactoryResolver's host-detection bootstrap probes Program.Main and leaves extra
+    /// Memory/EnvironmentVariables/CommandLine "host config" layers ahead of the app's own
+    /// appsettings-&gt;appsettings.{env}-&gt;secrets-&gt;env-vars-&gt;command-line chain, in the
+    /// SAME builder.Configuration.Sources list - confirmed empirically by instrumenting this
+    /// method under a failing WebApplicationFactory-based test. Those earlier layers are bootstrap
+    /// noise, not the real app-level environment-variables source; the real one is the last in the
+    /// list, immediately before the final CommandLineConfigurationSource. Pivoting on the first
+    /// occurrence would insert secrets ahead of even appsettings.json in that scenario - pivoting
+    /// on the last occurrence positions secrets correctly relative to the real app config chain
+    /// regardless of how many earlier bootstrap-only env-vars layers exist ahead of it, and is a
+    /// no-op behavior change from "the only one" in every case where there is in fact only one.
+    /// </summary>
+    public static void RepositionBeforeEnvironmentVariables(
+        IList<IConfigurationSource> sources,
+        Func<IConfigurationSource, bool> isTargetSource,
+        Action<IList<IConfigurationSource>> addSource)
+    {
+        var existingIndex = IndexOf(sources, isTargetSource);
+        IConfigurationSource targetSource;
+        if (existingIndex >= 0)
+        {
+            targetSource = sources[existingIndex];
+            sources.RemoveAt(existingIndex);
+        }
+        else
+        {
+            addSource(sources);
+            var addedIndex = IndexOf(sources, isTargetSource);
+            if (addedIndex < 0)
+            {
+                throw new InvalidOperationException(
+                    "addSource did not add a source matching isTargetSource.");
+            }
+            targetSource = sources[addedIndex];
+            sources.RemoveAt(addedIndex);
+        }
+
+        var envVarIndices = sources
+            .Select((source, index) => (Source: source, Index: index))
+            .Where(x => x.Source is EnvironmentVariablesConfigurationSource)
+            .ToList();
+        if (envVarIndices.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "Expected at least one EnvironmentVariablesConfigurationSource in the configuration " +
+                "source list, found none. Refusing to guess an insertion point.");
+        }
+
+        // Pivot on the LAST occurrence - see the XML doc comment above for why this differs from
+        // "the only one" under WebApplicationFactory's host-detection bootstrap.
+        sources.Insert(envVarIndices[^1].Index, targetSource);
+
+        static int IndexOf(IList<IConfigurationSource> sources, Func<IConfigurationSource, bool> predicate)
+        {
+            for (var i = 0; i < sources.Count; i++)
+            {
+                if (predicate(sources[i]))
+                    return i;
+            }
+            return -1;
+        }
+    }
+
+    /// <summary>
+    /// Loads user-secrets in every environment, not just Development - WebApplication.CreateBuilder
+    /// only adds a user-secrets source implicitly when the environment is Development, which is
+    /// exactly why a Task-Scheduler-launched process (Production unless told otherwise) never saw
+    /// user-secrets-backed config before this fix. Naively appending AddUserSecrets&lt;Program&gt;()
+    /// after the builder already exists would land it after environment variables in the source
+    /// list (last-source-wins), silently letting a stale secrets.json value outrank a live
+    /// environment variable - SETUP.md documents environment variables as a supported config path.
+    /// This also avoids adding a second, redundant user-secrets source under Development, where
+    /// CreateBuilder has already added one implicitly. See RepositionBeforeEnvironmentVariables for
+    /// the shared repositioning algorithm and ProgramConfigurationTests for the structural test
+    /// proving both branches (already-present vs. not) against a real WebApplicationBuilder.
+    /// </summary>
+    public static void InsertUserSecretsBeforeEnvironmentVariables(IConfigurationBuilder configurationBuilder)
+    {
+        RepositionBeforeEnvironmentVariables(
+            configurationBuilder.Sources,
+            static source => source is JsonConfigurationSource { Path: "secrets.json" },
+            _ => configurationBuilder.AddUserSecrets<Program>());
+    }
+
+    /// <summary>
+    /// Names and load status only for each built configuration provider - never a key or a value.
+    /// "Loaded" is true/false for file-backed providers (appsettings*.json, the user-secrets file)
+    /// when determinable from the provider's own FileProvider/Path, and null for provider kinds
+    /// where "loaded" isn't a meaningful concept (environment variables, in-memory, command line).
+    /// Logged once at startup alongside BuildInfo.Marker so "did my config actually resolve the
+    /// way I expected" is answerable from the log alone, without ever risking a secret in that log.
+    /// </summary>
+    public static IReadOnlyList<ConfigurationSourceDescription> DescribeConfigurationSources(
+        IConfigurationRoot configurationRoot)
+    {
+        var descriptions = new List<ConfigurationSourceDescription>();
+        foreach (var provider in configurationRoot.Providers)
+        {
+            bool? loaded = provider is FileConfigurationProvider fileProvider
+                ? fileProvider.Source.FileProvider?.GetFileInfo(fileProvider.Source.Path ?? string.Empty).Exists
+                : null;
+            descriptions.Add(new ConfigurationSourceDescription(provider.GetType().Name, loaded));
+        }
+        return descriptions;
+    }
 }
+
+/// <summary>
+/// One configuration provider's name and (when determinable) whether its backing file existed at
+/// startup. See Program.DescribeConfigurationSources.
+/// </summary>
+public record ConfigurationSourceDescription(string ProviderName, bool? Loaded);
