@@ -199,6 +199,27 @@ running:
 | `POST /tailored/{draftId}/export-to-rezi` | Writes that exact persisted draft's content to Rezi's `ForEditResumeId` slot and marks it exported. The only endpoint that writes to Rezi. |
 | `POST /eval` | Runs the hand-labeled set through the real scoring pipeline and reports precision/recall/F1. |
 
+### Shared pipeline-run lock (`POST /ingest`, `POST /run`)
+
+`POST /ingest` and `POST /run` both mutate the same pgvector rows (embeddings,
+`scored_at`, drafts), so they share one exclusive, cross-process file lock
+(`%LOCALAPPDATA%\JobLens\run.lock`) guarding at most one pipeline-mutating
+request at a time. Acquisition is immediate and non-blocking - a request that
+loses the race never falls back to waiting or retrying. If either endpoint is
+called while the other (or the same one) already holds the lock, it returns
+immediately, before any feed/parse/embed/score work, with:
+
+```json
+409 Conflict
+{"error":"Another JobLens pipeline run is already in progress."}
+```
+
+An unlocked call behaves exactly as documented above; the lock is released as
+soon as that request finishes (success, error, or client disconnect), and the
+now-empty `run.lock` file is left in place rather than deleted - a persistent,
+zero-byte lock file on disk is the normal steady state between runs, not
+something to clean up.
+
 ### Tailoring and export safety contract
 
 PostgreSQL is the source of truth for tailored drafts; Rezi is only a mutable

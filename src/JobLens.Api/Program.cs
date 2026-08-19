@@ -95,6 +95,12 @@ builder.Services.AddSingleton<IDatastore, PgvectorDatastore>();
 builder.Services.AddSingleton<ITemplateCatalog, TemplateCatalog>();
 builder.Services.AddSingleton<IRelevanceScorer, LlmRelevanceScorer>();
 builder.Services.AddSingleton<INotifier, ConsoleNotifier>();
+
+// Holds only the injectable lock-file path; each entry point acquires and owns a short-lived
+// FileStream handle for exactly its own request lifetime. The RunLock helper deliberately does
+// not resolve %LOCALAPPDATA% itself so tests can replace this singleton with an isolated temp path.
+builder.Services.AddSingleton(new RunLock(Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JobLens", "run.lock")));
 builder.Services.AddSingleton<PipelineRunner>();
 builder.Services.AddSingleton<EvalHarness>();
 
@@ -148,6 +154,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok", build = BuildInfo.Ma
 // whole archive - Milestone 6's /run covers postings ingested before scoring was run
 // by pulling unscored postings from pgvector instead.
 app.MapPost("/ingest", async (
+    RunLock runLock,
     IJobFeedSource feedSource,
     IPostingParser parser,
     IEmbedder embedder,
@@ -156,6 +163,14 @@ app.MapPost("/ingest", async (
     IOptions<JobLensOptions> options,
     CancellationToken cancellationToken) =>
 {
+    using var runLockHandle = runLock.TryAcquire();
+    if (runLockHandle is null)
+    {
+        return Results.Json(
+            new { error = "Another JobLens pipeline run is already in progress." },
+            statusCode: StatusCodes.Status409Conflict);
+    }
+
     var messages = await feedSource.GetMessagesAsync(cancellationToken);
     var parsed = messages.Select(m => (Message: m, Posting: parser.Parse(m))).ToList();
     var parsedCount = parsed.Count(x => x.Posting is not null);
@@ -200,8 +215,19 @@ app.MapPost("/ingest", async (
 // usable scores - notifies matches at/above MatchThreshold (deduped across the whole
 // run, not just per batch), and marks exactly what got scored so a later run never
 // re-scores or re-notifies it.
-app.MapPost("/run", async (PipelineRunner runner, CancellationToken cancellationToken) =>
+app.MapPost("/run", async (
+    RunLock runLock,
+    PipelineRunner runner,
+    CancellationToken cancellationToken) =>
 {
+    using var runLockHandle = runLock.TryAcquire();
+    if (runLockHandle is null)
+    {
+        return Results.Json(
+            new { error = "Another JobLens pipeline run is already in progress." },
+            statusCode: StatusCodes.Status409Conflict);
+    }
+
     var summary = await runner.RunAsync(cancellationToken);
     return Results.Ok(summary);
 });

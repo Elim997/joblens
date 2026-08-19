@@ -1,6 +1,19 @@
 @JobLens.Api_HostAddress = http://localhost:5183
 
-GET {{JobLens.Api_HostAddress}}/weatherforecast/
+# POST /ingest and POST /run share one exclusive, cross-process pipeline-run
+# lock (%LOCALAPPDATA%\JobLens\run.lock) - only one of them can be mutating
+# pgvector at a time. If the lock is already held (by the other endpoint, or
+# a concurrent call to the same one), the request returns immediately with:
+#   409 Conflict
+#   {"error":"Another JobLens pipeline run is already in progress."}
+# instead of doing any feed/parse/embed/score work.
+
+POST {{JobLens.Api_HostAddress}}/ingest
+Accept: application/json
+
+###
+
+POST {{JobLens.Api_HostAddress}}/run
 Accept: application/json
 
 ###
