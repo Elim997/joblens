@@ -22,6 +22,7 @@ public class ConfigurationTests
                 ["JobLens:ScoringTemplates:0:Profile"] = "C# and Postgres profile",
                 ["JobLens:ScoringTemplates:1:Name"] = "QA",
                 ["JobLens:ScoringTemplates:1:Profile"] = "Selenium automation profile",
+                ["JobLens:BridgeHealthPort"] = "9090",
             })
             .Build();
 
@@ -34,6 +35,7 @@ public class ConfigurationTests
         Assert.Equal("C:/data/messages.db", options.MessagesDbPath);
         Assert.Equal(["120363427094606388@g.us", "111111111111111111@g.us"], options.GroupChatJids);
         Assert.Equal(["Software", "QA"], options.TargetCategories);
+        Assert.Equal(9090, options.BridgeHealthPort);
         Assert.Collection(options.ScoringTemplates,
             backend =>
             {
@@ -45,5 +47,18 @@ public class ConfigurationTests
                 Assert.Equal("QA", qa.Name);
                 Assert.Equal("Selenium automation profile", qa.Profile);
             });
+    }
+
+    [Fact]
+    public void JobLensOptions_UsesDefaultBridgeHealthPortWhenNotConfigured()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection().Build();
+        var services = new ServiceCollection();
+        services.Configure<JobLensOptions>(config.GetSection("JobLens"));
+        using var provider = services.BuildServiceProvider();
+
+        var options = provider.GetRequiredService<IOptions<JobLensOptions>>().Value;
+
+        Assert.Equal(8080, options.BridgeHealthPort);
     }
 }

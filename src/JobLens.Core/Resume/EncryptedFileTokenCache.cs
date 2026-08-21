@@ -6,6 +6,22 @@ using ModelContextProtocol.Authentication;
 
 namespace JobLens.Core.Resume;
 
+public enum ReziTokenCacheStatus
+{
+    Absent,
+    Undecryptable,
+    Present,
+}
+
+public record ReziTokenCacheInspection(
+    ReziTokenCacheStatus Status,
+    Exception? Exception = null);
+
+public interface IReziTokenCacheDiagnostics
+{
+    ValueTask<ReziTokenCacheInspection> InspectAsync(CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// Persists the Rezi OAuth token across process restarts so a headless service reuses the
 /// ~30-day access token instead of needing an interactive login on every start. Encrypted at
@@ -14,7 +30,8 @@ namespace JobLens.Core.Resume;
 /// tools/ReziLogin while the service is running is picked up by the very next request.
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class EncryptedFileTokenCache(string path, ILogger<EncryptedFileTokenCache> logger) : ITokenCache
+public sealed class EncryptedFileTokenCache(string path, ILogger<EncryptedFileTokenCache> logger)
+    : ITokenCache, IReziTokenCacheDiagnostics
 {
     private static readonly byte[] Entropy = "JobLens.Resume.EncryptedFileTokenCache"u8.ToArray();
 
@@ -38,22 +55,47 @@ public sealed class EncryptedFileTokenCache(string path, ILogger<EncryptedFileTo
 
     public async ValueTask<TokenContainer?> GetTokensAsync(CancellationToken cancellationToken)
     {
+        var (tokens, inspection) = await ReadAsync(cancellationToken);
+        if (inspection.Status == ReziTokenCacheStatus.Undecryptable)
+        {
+            // Corrupt cache file, or encrypted under a different Windows user account -
+            // retain the ITokenCache fail-soft behavior while exposing the distinction to
+            // read-only preflight diagnostics through InspectAsync.
+            logger.LogWarning(
+                inspection.Exception,
+                "Could not read Rezi token cache at {Path}; treating as absent.",
+                path);
+        }
+
+        return tokens;
+    }
+
+    public async ValueTask<ReziTokenCacheInspection> InspectAsync(CancellationToken cancellationToken)
+    {
+        var (_, inspection) = await ReadAsync(cancellationToken);
+        return inspection;
+    }
+
+    private async ValueTask<(TokenContainer? Tokens, ReziTokenCacheInspection Inspection)> ReadAsync(
+        CancellationToken cancellationToken)
+    {
         if (!File.Exists(path))
-            return null;
+            return (null, new ReziTokenCacheInspection(ReziTokenCacheStatus.Absent));
 
         try
         {
             var encrypted = await File.ReadAllBytesAsync(path, cancellationToken);
             var json = ProtectedData.Unprotect(encrypted, Entropy, DataProtectionScope.CurrentUser);
-            return JsonSerializer.Deserialize<TokenContainer>(json);
+            var tokens = JsonSerializer.Deserialize<TokenContainer>(json);
+            return tokens is null
+                ? (null, new ReziTokenCacheInspection(
+                    ReziTokenCacheStatus.Undecryptable,
+                    new JsonException("The Rezi token cache contained JSON null.")))
+                : (tokens, new ReziTokenCacheInspection(ReziTokenCacheStatus.Present));
         }
         catch (Exception ex) when (ex is CryptographicException or JsonException)
         {
-            // Corrupt cache file, or encrypted under a different Windows user account -
-            // treat as "no cached token" rather than crash; re-running tools/ReziLogin
-            // regenerates it (see ReziAuthenticationRequiredException for the guidance callers see).
-            logger.LogWarning(ex, "Could not read Rezi token cache at {Path}; treating as absent.", path);
-            return null;
+            return (null, new ReziTokenCacheInspection(ReziTokenCacheStatus.Undecryptable, ex));
         }
     }
 }

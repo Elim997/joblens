@@ -200,6 +200,41 @@ public class ProgramValidationTests
         Assert.Null(exception);
     }
 
+    [Theory]
+    [InlineData("0")]
+    [InlineData("65536")]
+    public void ValidateRequiredConfig_BridgeHealthPortOutOfRange_Throws(string port)
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            ["JobLens:BridgeHealthPort"] = port,
+        };
+        var config = BuildConfig(values);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            Program.ValidateRequiredConfig(config));
+
+        Assert.Contains("BridgeHealthPort", exception.Message);
+        Assert.Contains("between 1 and 65535", exception.Message);
+    }
+
+    [Theory]
+    [InlineData("1")]
+    [InlineData("8080")]
+    [InlineData("65535")]
+    public void ValidateRequiredConfig_ValidBridgeHealthPort_DoesNotThrow(string port)
+    {
+        var values = new Dictionary<string, string?>(AllRequiredSettingsPresent)
+        {
+            ["JobLens:BridgeHealthPort"] = port,
+        };
+        var config = BuildConfig(values);
+
+        var exception = Record.Exception(() => Program.ValidateRequiredConfig(config));
+
+        Assert.Null(exception);
+    }
+
     [Fact]
     public void ValidateRequiredConfig_NoExplicitThresholds_UsesDefaultsAndDoesNotThrow()
     {

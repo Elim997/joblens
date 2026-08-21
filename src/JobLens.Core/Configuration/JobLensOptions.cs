@@ -18,4 +18,5 @@ public class JobLensOptions
     // during /run (via TailoredDraftService, the same path POST /tailor uses) - never exported
     // to Rezi automatically. Must be >= MatchThreshold; see Program.ValidateRequiredConfig.
     public int AutoTailorThreshold { get; set; } = 80;
+    public int BridgeHealthPort { get; set; } = 8080;
 }

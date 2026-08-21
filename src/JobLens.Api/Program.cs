@@ -104,13 +104,21 @@ builder.Services.AddSingleton(new RunLock(Path.Combine(
 builder.Services.AddSingleton<IngestService>();
 builder.Services.AddSingleton<PipelineRunner>();
 builder.Services.AddSingleton<EvalHarness>();
+builder.Services.AddSingleton<IPostgresReadinessProbe, NpgsqlPostgresReadinessProbe>();
+builder.Services.AddSingleton<ISourceFreshnessProbe, SqliteSourceFreshnessProbe>();
+builder.Services.AddSingleton<IBridgeHealthProbe, TcpBridgeHealthProbe>();
+builder.Services.AddSingleton<IPreflightRuntime, SystemPreflightRuntime>();
+builder.Services.AddSingleton<IPreflight, Preflight>();
 
 // EncryptedFileTokenCache is DPAPI-backed and Windows-only; this project already assumes
 // Windows (see SETUP.md), so the platform-compat warning is suppressed at this one call site
 // rather than tagging the whole assembly, which would incorrectly mark unrelated endpoints too.
 #pragma warning disable CA1416
-builder.Services.AddSingleton<ITokenCache>(sp => new EncryptedFileTokenCache(
+builder.Services.AddSingleton(sp => new EncryptedFileTokenCache(
     ReziMcpConnection.DefaultTokenCachePath, sp.GetRequiredService<ILogger<EncryptedFileTokenCache>>()));
+builder.Services.AddSingleton<ITokenCache>(sp => sp.GetRequiredService<EncryptedFileTokenCache>());
+builder.Services.AddSingleton<IReziTokenCacheDiagnostics>(sp =>
+    sp.GetRequiredService<EncryptedFileTokenCache>());
 #pragma warning restore CA1416
 builder.Services.AddSingleton<IResumeClient, RealResumeClient>();
 builder.Services.AddSingleton<IResumeTailor, LlmResumeTailor>();
@@ -138,6 +146,32 @@ foreach (var source in Program.DescribeConfigurationSources((IConfigurationRoot)
 // built configuration - rather than the pre-Build builder.Configuration, so a test
 // host's config overrides (only merged in during Build()) are visible here. See
 // Program.ValidateRequiredConfig for the hermetic unit tests that prove this directly.
+if (args.Contains("--preflight", StringComparer.OrdinalIgnoreCase))
+{
+    using var cancellation = new CancellationTokenSource();
+    ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+    {
+        eventArgs.Cancel = true;
+        cancellation.Cancel();
+    };
+    Console.CancelKeyPress += cancelHandler;
+
+    try
+    {
+        var result = await Program.RunPreflightModeAsync(
+                app.Services,
+                startupLogger,
+                cancellation.Token);
+        Environment.ExitCode = result.ExitCode;
+        await app.DisposeAsync();
+        return;
+    }
+    finally
+    {
+        Console.CancelKeyPress -= cancelHandler;
+    }
+}
+
 Program.ValidateRequiredConfig(app.Configuration);
 
 if (app.Environment.IsDevelopment())
@@ -339,77 +373,40 @@ public partial class Program
     /// is a pure function of IConfiguration, so ProgramValidationTests can exercise it
     /// hermetically with in-memory values.
     /// </summary>
-    public static void ValidateRequiredConfig(IConfiguration config)
+    public static void ValidateRequiredConfig(IConfiguration config) =>
+        RequiredConfigurationValidator.Validate(config);
+
+
+    public static async Task<PreflightResult> RunPreflightModeAsync(
+        IServiceProvider services,
+        ILogger logger,
+        CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(config["JobLens:MessagesDbPath"]))
-            throw new InvalidOperationException("Missing JobLens:MessagesDbPath");
-        if (config.GetSection("JobLens:GroupChatJids").Get<string[]>() is not { Length: > 0 })
-            throw new InvalidOperationException("Missing JobLens:GroupChatJids (must be a non-empty array)");
+        var result = await services.GetRequiredService<IPreflight>()
+            .RunAsync(cancellationToken);
+        ReportPreflight(result, logger);
+        return result;
+    }
 
-        var scoringTemplates = config.GetSection("JobLens:ScoringTemplates").Get<ScoringTemplateOptions[]>();
-        if (scoringTemplates is not { Length: > 0 })
-            throw new InvalidOperationException("Missing JobLens:ScoringTemplates (must be a non-empty array)");
-        if (scoringTemplates.Any(t => string.IsNullOrWhiteSpace(t.Name) || string.IsNullOrWhiteSpace(t.Profile)))
-        {
-            throw new InvalidOperationException(
-                "Each JobLens:ScoringTemplates entry must have a non-empty Name and Profile");
-        }
-        if (scoringTemplates.Select(t => t.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() !=
-            scoringTemplates.Length)
-        {
-            throw new InvalidOperationException("JobLens:ScoringTemplates names must be unique");
-        }
+    public static void ReportPreflight(PreflightResult result, ILogger logger)
+    {
+        logger.LogInformation(
+            "Preflight summary: status={Status} exitCode={ExitCode} build={Build} " +
+            "reziTokenCache={ReziTokenCache} latestConfiguredGroupMessage={LatestMessage} " +
+            "bridgeHealthy={BridgeHealthy} warnings={WarningCount} failures={FailureCount}",
+            result.Status,
+            result.ExitCode,
+            result.Build,
+            result.ReziTokenCache?.ToString() ?? "not-inspected",
+            result.LatestConfiguredGroupMessage?.ToString("O") ?? "unavailable",
+            result.BridgeHealthy?.ToString() ?? "unavailable",
+            result.Warnings.Count,
+            result.Failures.Count);
 
-        // AutoTailorThreshold gates automatic TailoredDraft creation during /run (Milestone E).
-        // It must sit within the valid 0-100 score range and at or above MatchThreshold - below
-        // that, /run would auto-tailor postings that never even reached match status, which
-        // contradicts the three-tier score contract, so this fails startup instead of warning.
-        var defaults = new JobLensOptions();
-        var matchThreshold = config.GetValue("JobLens:MatchThreshold", defaults.MatchThreshold);
-        var autoTailorThreshold = config.GetValue("JobLens:AutoTailorThreshold", defaults.AutoTailorThreshold);
-
-        if (autoTailorThreshold < 0 || autoTailorThreshold > 100)
-        {
-            throw new InvalidOperationException(
-                "JobLens:AutoTailorThreshold must be between 0 and 100 (the valid relevance score range)");
-        }
-        if (autoTailorThreshold < matchThreshold)
-        {
-            throw new InvalidOperationException(
-                "JobLens:AutoTailorThreshold must be greater than or equal to JobLens:MatchThreshold");
-        }
-
-        if (string.IsNullOrWhiteSpace(config["Postgres:ConnectionString"]))
-            throw new InvalidOperationException("Missing Postgres:ConnectionString");
-        if (string.IsNullOrWhiteSpace(config["Gemini:ApiKey"]))
-            throw new InvalidOperationException("Missing Gemini:ApiKey");
-
-        var llmBaseUrl = config["Llm:BaseUrl"];
-        if (string.IsNullOrWhiteSpace(llmBaseUrl))
-            throw new InvalidOperationException("Missing Llm:BaseUrl");
-        if (!Uri.TryCreate(llmBaseUrl, UriKind.Absolute, out var llmUri) ||
-            (llmUri.Scheme != Uri.UriSchemeHttp && llmUri.Scheme != Uri.UriSchemeHttps))
-        {
-            throw new InvalidOperationException("Llm:BaseUrl must be an absolute HTTP or HTTPS URI");
-        }
-
-        if (string.IsNullOrWhiteSpace(config["Llm:ApiKey"]))
-            throw new InvalidOperationException("Missing Llm:ApiKey");
-
-        var scoringModel = config["Llm:ScoringModel"];
-        if (string.IsNullOrWhiteSpace(scoringModel))
-            throw new InvalidOperationException("Missing Llm:ScoringModel");
-
-        var tailoringModel = config["Llm:TailoringModel"];
-        if (string.IsNullOrWhiteSpace(tailoringModel))
-            throw new InvalidOperationException("Missing Llm:TailoringModel");
-
-        if (string.Equals(scoringModel.Trim(), "coding-fallback", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(tailoringModel.Trim(), scoringModel.Trim(), StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(
-                "Llm:TailoringModel must be a dedicated model, not the scoring fallback combo");
-        }
+        foreach (var warning in result.Warnings)
+            logger.LogWarning("Preflight warning: {Warning}", warning);
+        foreach (var failure in result.Failures)
+            logger.LogError("Preflight failure: {Failure}", failure);
     }
 
     /// <summary>
