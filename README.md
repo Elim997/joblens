@@ -279,9 +279,10 @@ touches the lock, so it can be run safely while a pipeline run is in progress.
 
 PostgreSQL, the read-only WhatsApp bridge, OmniRoute, and Rezi authentication
 remain external prerequisites - `--run-once` checks them and reports on them,
-but never starts, stops, or authenticates any of them. Publishing the app and
-registering it with Windows Task Scheduler are a separate milestone;
-`--run-once` does not install, register, or schedule anything.
+but never starts, stops, or authenticates any of them. `--run-once` itself does
+not install, register, or schedule anything - publishing the app and registering
+it with Windows Task Scheduler is deployment tooling that lives outside the
+application, in `scripts/` and SETUP.md's "Scheduled operation" section.
 
 ### Tailoring and export safety contract
 

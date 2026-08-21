@@ -318,3 +318,259 @@ notepad dev-config.ps1   # fill in BridgeDir, ApiProjectPath, etc.
 - If the bridge was started outside this script (e.g. you ran `go run main.go`
   yourself in another window), this script detects and leaves it running, but can't
   stop it for you on exit - close that window yourself when you're done.
+
+## 9. Scheduled operation (Windows Task Scheduler)
+
+Section 8 is the interactive dev loop. This section is the unattended one: a
+published build that Windows runs three times a day and that exits when it's
+done.
+
+```
+Windows Task Scheduler
+  -> <deploy root>\run-joblens-scheduled.ps1
+    -> <deploy root>\app\JobLens.Api.exe --run-once
+      -> RunLock -> preflight -> ingest -> backlog scoring -> structured report -> exit
+```
+
+No Kestrel host is left running, no second JobLens process is started, and no
+HTTP call is made to a local API - `--run-once` is the same in-process pipeline
+the API's endpoints use, driven straight from the CLI.
+
+### Prerequisites
+
+Everything from sections 0-5 and 7, already working interactively, plus the same
+external processes JobLens always needs, each with its own lifecycle:
+
+- **PostgreSQL + pgvector** (the `joblens-pg` container) running.
+- **The WhatsApp bridge** running, so `messages.db` keeps receiving new messages.
+- **OmniRoute** reachable at `Llm:BaseUrl`.
+- **A valid Rezi token** if you want tailoring to happen (section 7).
+
+The scheduled task starts and stops **none** of these, by design. It launches
+JobLens and nothing else. If a dependency is down, JobLens reports it through
+preflight and exits with a status that says so, rather than trying to repair your
+machine at 23:00. Practically: keep `scripts/start-joblens.ps1`'s dependencies up,
+or accept that a run landing in a window where they're down will exit degraded or
+fatal and log why.
+
+### Publish
+
+```
+.\scripts\publish-joblens.ps1
+```
+
+This publishes **Release**, **framework-dependent** (about 11 MB, ~29 files) into
+a stable, user-owned location and copies the scheduled launcher next to it:
+
+```
+%LOCALAPPDATA%\JobLens\
+  app\                       published binaries, replaced on every publish
+  app\JobLens.Api.exe        what the task ultimately runs
+  run-joblens-scheduled.ps1  what the task directly invokes
+  logs\                      one log per run
+  run.lock                   RunLock's file        (pre-existing, never touched)
+  rezi-token.dat             DPAPI token cache     (pre-existing, never touched)
+```
+
+Framework-dependent rather than self-contained because the deployment target *is*
+the machine that builds this repository, so the .NET 10 SDK - and therefore the
+runtime - is already installed. A self-contained publish would add roughly 70 MB
+of duplicated runtime per publish and a `RuntimeIdentifier` to keep in sync, for
+no benefit on a single-machine deployment.
+
+`%LOCALAPPDATA%\JobLens` is deliberate too: it needs no administrator rights, it's
+already where `run.lock` and the DPAPI-protected `rezi-token.dat` live, and it
+resolves per user from the environment - so nothing in this repository has to name
+your Windows account. Use `-DeployRoot` if you want it somewhere else.
+
+The publish script clears `app\` before publishing (so a file dropped from the
+project can't linger), and refuses to clear a non-empty `app\` that doesn't look
+like a previous JobLens publish. Logs, the lock, the token cache, user-secrets,
+`messages.db`, and PostgreSQL are all outside `app\` and are never touched.
+
+### Verify the published build manually, as yourself, before scheduling anything
+
+```
+& "$env:LOCALAPPDATA\JobLens\app\JobLens.Api.exe" --preflight
+```
+
+`--preflight` is read-only: it validates required configuration, probes
+PostgreSQL, reads the WhatsApp SQLite source and checks how fresh the newest
+message in your configured groups is, TCP-probes the bridge, and reports whether
+the Rezi token cache is present and readable. It never writes, never ingests,
+never scores, and never prints a key, a value, or a token. Exit codes: `0`
+success, `1` fatal, `3` degraded, `4` cancelled.
+
+Run this from the **same Windows account** the task will use, because that is
+what proves the parts that differ per user actually resolve: `%LOCALAPPDATA%`,
+the run lock, the DPAPI token cache, user-secrets, and the `messages.db` path.
+A preflight that passed under a different account proves nothing about the
+scheduled one.
+
+Then do one real run:
+
+```
+& "$env:LOCALAPPDATA\JobLens\app\JobLens.Api.exe" --run-once
+```
+
+and one through the launcher, which is what the task actually invokes:
+
+```
+& "$env:LOCALAPPDATA\JobLens\run-joblens-scheduled.ps1"
+```
+
+Running `--run-once` twice is safe and is worth doing: ingest de-duplicates by
+message id, so the second run reports the same postings as `alreadyStored` and
+stores no duplicates.
+
+### Register the task
+
+```
+.\scripts\register-joblens-task.ps1 -WhatIf   # prints the exact plan, changes nothing
+.\scripts\register-joblens-task.ps1           # registers or updates it
+```
+
+The script refuses to register if nothing is published yet, prints everything it
+is about to register first, and is safe to re-run - re-running updates the single
+task named `JobLens Scheduled Run` in place and touches no other task.
+
+**Times.** One task with three daily triggers, in local machine time: **12:00**,
+**18:00**, **23:00**. One task rather than three keeps the schedule a single
+policy that can't drift apart. Override with `-At`.
+
+**Identity.** The task runs as **you**, logon type **Interactive** ("run only when
+the user is logged on"), not elevated. This is a requirement, not a default:
+
+- `rezi-token.dat` is DPAPI-protected for your account. Only a real interactive
+  logon session of that same account can decrypt it.
+- "Run whether user is logged on or not" would need either a stored Windows
+  password - which this repo will not ask for or keep anywhere - or an S4U logon,
+  and an S4U token has no access to your DPAPI master key, so Rezi authentication
+  would break.
+- `SYSTEM` or any other account resolves a *different* `%LOCALAPPDATA%`, a
+  different user-secrets store and a different run-lock path, and cannot read your
+  token cache.
+
+So stay logged on. A run that falls in a logged-off or sleeping window is picked
+up afterwards by the missed-run setting below.
+
+**Settings, and why:**
+
+| Setting | Value | Why |
+|---|---|---|
+| Multiple instances | Do not start a new instance | A second concurrent run would just hit `RunLock` and exit `2`. `RunLock` - not this setting - is the authoritative guard; it also covers the API's `/ingest` and `/run`, which Task Scheduler can't see. |
+| Missed runs | Run as soon as possible afterwards | Safe here: ingest is idempotent (repeats come back as `alreadyStored`) and scoring drains the stored backlog rather than only what just arrived, so a catch-up run does real work and creates no duplicates. |
+| Execution time limit | 2 hours | A normal run is minutes; a large first backlog with per-batch LLM scoring is legitimately slow, so don't kill healthy runs. Bounded so a wedged process can't hold `RunLock` forever. Termination is safe - the lock is an open file handle Windows releases when the process dies. |
+| Battery | May start on battery, not stopped on battery | Desktop machine; and even on a laptop, skipping an ingest to save power costs more than it saves. |
+| Network | No network condition | The run does need the network, but a Task Scheduler condition would *silently skip*. Preflight instead reports an unreachable dependency with an exit code and a log line. |
+| Wake to run | No | Not worth waking the machine for a backlog-based pipeline; the missed-run setting catches it up on resume. |
+| Working directory | The published `app\` directory | Task Scheduler doesn't start a process in its own directory, and `appsettings.json` sits beside the executable. The launcher pins it as well, so both paths are covered. |
+
+Nothing sensitive goes into the task: the action is a path plus the single
+argument `--run-once`. Every secret still comes from the same per-user
+user-secrets store and environment the interactive app uses - the published
+assembly carries the `UserSecretsId`, and `Program.InsertUserSecretsBeforeEnvironmentVariables`
+(Milestone F1) loads user-secrets in **every** environment, not just Development,
+precisely so a Task Scheduler-launched process - which runs as Production - sees
+them. No new secret store was introduced for scheduling.
+
+Inspect what actually got registered:
+
+```
+Get-ScheduledTask -TaskName 'JobLens Scheduled Run' | Get-ScheduledTaskInfo
+Start-ScheduledTask -TaskName 'JobLens Scheduled Run'   # run it now, on demand
+```
+
+### Logs
+
+One pair of files per run, in `%LOCALAPPDATA%\JobLens\logs`:
+
+- `joblens-<yyyyMMdd-HHmmss>.out.log` - everything JobLens wrote to standard
+  output, which is where the .NET console logger sends the structured startup,
+  preflight, and scheduled-run report lines. The last line is added by the
+  launcher and records the process's final exit code.
+- `joblens-<yyyyMMdd-HHmmss>.err.log` - standard error, **kept only if something
+  was written to it**. An `.err.log` existing at all is therefore itself a signal.
+
+Nothing is discarded. The launcher keeps the most recent 60 runs (about twenty
+days at three a day) and deletes older pairs; change it with `-RetainLogCount`.
+No new logging framework was added to the application for this - the deployment
+captures the process's streams, which is the smallest thing that works.
+
+The run report names postings, companies, scores, templates and draft outcomes,
+but never a key, a token, a connection string, a group chat_jid, or a resume id.
+
+### Exit codes
+
+The launcher returns JobLens's own exit code unchanged, so Task Scheduler's
+**Last Run Result** is JobLens's verdict:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success. |
+| `1` | Fatal - preflight found a broken environment, or an unexpected error. Nothing useful ran. |
+| `2` | Another pipeline run held the shared lock, so this run did nothing. |
+| `3` | Completed, degraded - real work happened and was kept, but something is wrong. See below. |
+| `4` | Cancelled. |
+| `64` | The **launcher** failed before JobLens started (typically: nothing published yet). Deliberately outside JobLens's range so the two can't be confused. |
+
+Exit `3` means the run **succeeded and kept its results**, and is expected from
+time to time. It is produced by: a degraded preflight (e.g. the bridge is down but
+the SQLite source is still readable, so existing messages still ingest and the
+backlog still scores), a Rezi authentication failure (scoring and matching are
+preserved; only drafting is skipped), a scoring transport failure against
+OmniRoute (the fail-soft partial result is preserved), the pipeline stopping
+early, or recoverable tailoring failures. A stale-source warning on an otherwise
+healthy preflight is reported but does **not** by itself degrade the run.
+
+### Updating JobLens later
+
+```
+git pull
+.\scripts\publish-joblens.ps1
+```
+
+That's the whole procedure. The task points at the stable deployment root, never
+at a version-specific output directory, so it does not need to be re-registered -
+including when the launcher itself changes, since publishing refreshes it too.
+Re-register only if you want to change the times, the settings, or the deployment
+path.
+
+### Uninstalling the schedule
+
+```
+.\scripts\unregister-joblens-task.ps1 -WhatIf
+.\scripts\unregister-joblens-task.ps1
+```
+
+Removes exactly that one task and stops all future automatic runs. It
+deliberately leaves the published binaries, the logs, `run.lock`,
+`rezi-token.dat`, user-secrets, the PostgreSQL database and container, and the
+WhatsApp session and `messages.db` alone - none of that is owned by the
+scheduler, and some of it is expensive or impossible to recreate. JobLens still
+runs interactively exactly as before. Delete `%LOCALAPPDATA%\JobLens\app` and
+`%LOCALAPPDATA%\JobLens\logs` by hand if you want the disk space back.
+
+### Troubleshooting
+
+Start with the newest `.out.log` in `%LOCALAPPDATA%\JobLens\logs`. Its first lines
+are the build marker and one `Config source: ... loaded=` line per configuration
+provider, and its final lines are the scheduled-run report and the launcher's
+exit-code footer. Between those two you can usually tell what happened without
+touching Task Scheduler at all.
+
+| Symptom | What it means / what to do |
+|---|---|
+| **Last Run Result `1`, log says a preflight failure** | A required dependency or key is broken. The preflight failure lines name which. Nothing was ingested or scored. |
+| **Last Run Result `2`** | Another run held `RunLock` - a still-running earlier scheduled run, or an interactive `/ingest`, `/run`, or `--run-once`. Normally self-correcting at the next trigger. If every run exits `2`, check for a stuck JobLens process; the lock is released when the process ends, so a stale `run.lock` file on disk is normal and is *not* the cause. |
+| **Last Run Result `3`** | Completed with a problem, results kept. Find the degrading condition in the log: a preflight `Degraded` status, `reziAuthFailed=True`, a scoring transport failure, `stoppedEarly=True`, or `tailoringFailures>0`. |
+| **Last Run Result `4`** | Cancelled - Ctrl+C on a manual run, or Task Scheduler hitting the 2-hour limit or ending the task. |
+| **Last Run Result `64`** | The launcher couldn't start JobLens. Almost always: never published, or the deployment root was moved. Re-run `scripts\publish-joblens.ps1`. See `logs\launcher-errors.log`. |
+| **PostgreSQL unavailable** | Preflight reports the readiness probe failing and the run is fatal (`1`). Start the container (`docker start joblens-pg`) - the task will not start it for you, on purpose. |
+| **WhatsApp bridge unavailable** | The bridge TCP probe fails and the run is **degraded** (`3`), not fatal: `messages.db` is still readable, so already-synced messages still ingest and the backlog still scores. You just aren't receiving anything new. Restart the bridge (section 1 or `scripts\start-joblens.ps1`). |
+| **"Latest configured-group source message is older than 12 hours"** | Warning only; the run stays successful. Either the group is genuinely quiet, or the bridge has been silently disconnected for a while - check the bridge window, and re-scan the QR if the ~20-day session expired. |
+| **Rezi authentication expired or missing** | The run is degraded (`3`); matches are still scored and notified, drafts are skipped with outcome `SkippedAuth`. Fix with `dotnet run --project tools/ReziLogin` (section 7) **as the same Windows account the task runs as** - the token cache is DPAPI-protected per user and cannot be shared between accounts. |
+| **Task runs as the wrong account** | `Get-ScheduledTask -TaskName 'JobLens Scheduled Run' \| Select-Object -ExpandProperty Principal` should show your account with `LogonType Interactive`. If it shows `SYSTEM` or another user, the run will look for a different `%LOCALAPPDATA%`, a different user-secrets store and an unreadable token cache. Re-run `scripts\register-joblens-task.ps1` while logged in as the right account. |
+| **Missing configuration / user-secrets not found** | The `Config source: ...` lines near the top of the log tell you whether the user-secrets provider loaded. If it didn't, you're running as a different account, or the secrets were never set for this one - re-run the `dotnet user-secrets set` commands from section 5 as that account. Startup validation fails fast with a clear message naming the missing key; it never starts and fails later at first use. |
+| **Path or working-directory problems** | JobLens resolves the run lock and token cache from `%LOCALAPPDATA%` and takes `messages.db` from configuration, so paths don't depend on where it was launched. `appsettings.json` does sit beside the executable, which is why both the task and the launcher pin the working directory to `app\`. If the config-source lines show `appsettings.json loaded=False`, the working directory is the thing to check. |
+| **Nothing ran at all at 12:00 / 18:00 / 23:00** | The account was logged off (the task is Interactive by necessity - see Identity above), or the machine was asleep and hasn't resumed yet. The missed-run setting runs it once the session is back. Confirm the schedule with `Get-ScheduledTask -TaskName 'JobLens Scheduled Run' \| Get-ScheduledTaskInfo`. |
