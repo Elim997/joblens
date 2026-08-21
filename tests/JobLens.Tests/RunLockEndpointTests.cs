@@ -61,8 +61,11 @@ public class RunLockEndpointTests : IClassFixture<WebApplicationFactory<Program>
         Assert.Equal(0, notifier.Calls);
     }
 
+    // Post-F3 shape: /ingest reports ingest counters only. The RecordingScorer is still
+    // registered in DI, so scorer.Calls == 0 here is a real end-to-end guard that the
+    // convenience-scoring branch is gone, not just that the field was dropped from the JSON.
     [Fact]
-    public async Task Ingest_WhenUnlocked_PreservesExistingScoringResponseAndWork()
+    public async Task Ingest_WhenUnlocked_ReturnsIngestCountersOnlyAndNeverScores()
     {
         using var tempDirectory = new TempDirectory();
         var runLock = new RunLock(tempDirectory.LockFilePath);
@@ -98,17 +101,13 @@ public class RunLockEndpointTests : IClassFixture<WebApplicationFactory<Program>
         using var document = JsonDocument.Parse(body);
         var root = document.RootElement;
         Assert.Equal(
-            ["fetched", "parsed", "filteredOut", "alreadyStored", "newlyStored", "matches"],
+            ["fetched", "parsed", "filteredOut", "alreadyStored", "newlyStored"],
             root.EnumerateObject().Select(property => property.Name).ToArray());
         Assert.Equal(1, root.GetProperty("fetched").GetInt32());
         Assert.Equal(1, root.GetProperty("parsed").GetInt32());
         Assert.Equal(0, root.GetProperty("filteredOut").GetInt32());
         Assert.Equal(0, root.GetProperty("alreadyStored").GetInt32());
         Assert.Equal(1, root.GetProperty("newlyStored").GetInt32());
-        var match = Assert.Single(root.GetProperty("matches").EnumerateArray());
-        Assert.Equal("message-1", match.GetProperty("id").GetString());
-        Assert.Equal(91, match.GetProperty("score").GetInt32());
-        Assert.Equal("Test template", match.GetProperty("templateName").GetString());
 
         Assert.Equal(1, feedSource.Calls);
         Assert.Equal(1, parser.Calls);
@@ -116,7 +115,7 @@ public class RunLockEndpointTests : IClassFixture<WebApplicationFactory<Program>
         Assert.Equal(1, datastore.GetExistingMessageIdsCalls);
         Assert.Equal(1, datastore.EnsureSchemaCalls);
         Assert.Equal(1, datastore.UpsertCalls);
-        Assert.Equal(1, scorer.Calls);
+        Assert.Equal(0, scorer.Calls);
         Assert.Equal(0, notifier.Calls);
     }
 

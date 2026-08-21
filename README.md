@@ -189,7 +189,7 @@ running:
 
 | Endpoint | What it does |
 |---|---|
-| `POST /ingest` | Pulls new WhatsApp messages, parses, category-filters, embeds, and stores them in pgvector. |
+| `POST /ingest` | Pulls new WhatsApp messages, parses, category-filters, embeds, and stores them in pgvector - and nothing else. It never scores, notifies, or drafts: postings are stored unscored so the next `/run` scores them exactly once. Returns ingest counters only (`fetched`, `parsed`, `filteredOut`, `alreadyStored`, `newlyStored`). |
 | `POST /run` | Scores every unscored posting in the archive against the profile, notifies matches, and automatically creates a persisted `TailoredDraft` (zero Rezi writes) for postings scoring at or above `AutoTailorThreshold`. |
 | `GET /matches` | Stored matches (including `messageId`, score, and reasoning) from past runs; pass that id to `/tailor`. |
 | `GET /query?text=...` | Semantic search over the embedded posting archive. |
@@ -306,7 +306,7 @@ and export are fail-closed instead - any failure anywhere in either chain
 above produces zero writes and no status change, never a partial or
 best-effort one.
 
-234 tests pass (xUnit, non-live/default filter). Four integration test files -
+257 tests pass (xUnit, non-live/default filter). Four integration test files -
 `EvalEndpointIntegrationTests`, `LlmRelevanceScorerIntegrationTests`,
 `PgvectorDatastoreIntegrationTests`, and
 `PgvectorTailoredDraftStoreIntegrationTests` - need a live Postgres (the last

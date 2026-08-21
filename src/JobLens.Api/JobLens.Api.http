@@ -8,6 +8,11 @@
 #   {"error":"Another JobLens pipeline run is already in progress."}
 # instead of doing any feed/parse/embed/score work.
 
+# Ingest only: fetch -> parse -> category filter -> dedupe -> embed -> upsert.
+# It never scores, notifies, or drafts - newly stored postings are left unscored
+# so the next POST /run picks them up off the backlog and scores them exactly
+# once. Response:
+#   {"fetched":3,"parsed":3,"filteredOut":1,"alreadyStored":0,"newlyStored":2}
 POST {{JobLens.Api_HostAddress}}/ingest
 Accept: application/json
 

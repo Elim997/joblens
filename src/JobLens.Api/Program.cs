@@ -101,6 +101,7 @@ builder.Services.AddSingleton<INotifier, ConsoleNotifier>();
 // not resolve %LOCALAPPDATA% itself so tests can replace this singleton with an isolated temp path.
 builder.Services.AddSingleton(new RunLock(Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JobLens", "run.lock")));
+builder.Services.AddSingleton<IngestService>();
 builder.Services.AddSingleton<PipelineRunner>();
 builder.Services.AddSingleton<EvalHarness>();
 
@@ -147,20 +148,13 @@ if (app.Environment.IsDevelopment())
 app.MapGet("/health", () => Results.Ok(new { status = "ok", build = BuildInfo.Marker }));
 
 // Runs Feed -> Parse -> category filter -> Embed -> Store for every message currently
-// in the bridge's messages.db. Already-stored message ids are skipped before embedding
-// (embedding is the quota-limited step) and the remainder is embedded in batches, not
-// one API call per posting. The first embedding's live dimension sizes the schema.
-// Scoring here is a convenience over just this run's newly-embedded batch, not the
-// whole archive - Milestone 6's /run covers postings ingested before scoring was run
-// by pulling unscored postings from pgvector instead.
+// in the bridge's messages.db, and nothing else: no scoring, no notification, no drafting.
+// Newly stored postings are left unscored (scored_at NULL) on purpose, so the next /run
+// picks them up off the backlog and scores them exactly once. IngestService owns all of
+// that logic so the scheduled runner reuses this path rather than growing its own copy.
 app.MapPost("/ingest", async (
     RunLock runLock,
-    IJobFeedSource feedSource,
-    IPostingParser parser,
-    IEmbedder embedder,
-    IDatastore datastore,
-    IRelevanceScorer scorer,
-    IOptions<JobLensOptions> options,
+    IngestService ingestService,
     CancellationToken cancellationToken) =>
 {
     using var runLockHandle = runLock.TryAcquire();
@@ -171,41 +165,8 @@ app.MapPost("/ingest", async (
             statusCode: StatusCodes.Status409Conflict);
     }
 
-    var messages = await feedSource.GetMessagesAsync(cancellationToken);
-    var parsed = messages.Select(m => (Message: m, Posting: parser.Parse(m))).ToList();
-    var parsedCount = parsed.Count(x => x.Posting is not null);
-
-    var targetCategories = new HashSet<string>(options.Value.TargetCategories, StringComparer.OrdinalIgnoreCase);
-    var candidates = parsed
-        .Where(x => x.Posting is not null && targetCategories.Contains(x.Posting.Category))
-        .ToList();
-
-    var existingIds = await datastore.GetExistingMessageIdsAsync(cancellationToken);
-    var toEmbed = candidates.Where(x => !existingIds.Contains(x.Message.Id)).ToList();
-
-    IReadOnlyList<ScoredPosting> matches = [];
-    if (toEmbed.Count > 0)
-    {
-        var texts = toEmbed.Select(x => JobPostingTextNormalizer.ToEmbeddingText(x.Posting!)).ToList();
-        var embeddings = await embedder.EmbedBatchAsync(texts, cancellationToken);
-
-        await datastore.EnsureSchemaAsync(embeddings[0].Length, cancellationToken);
-        for (var i = 0; i < toEmbed.Count; i++)
-            await datastore.UpsertAsync(toEmbed[i].Message.Id, toEmbed[i].Posting!, embeddings[i], cancellationToken);
-
-        var scoringCandidates = toEmbed.Select((x, i) => (x.Message.Id, x.Posting!, embeddings[i])).ToList();
-        matches = await scorer.ScoreAsync(scoringCandidates, cancellationToken);
-    }
-
-    return Results.Ok(new
-    {
-        fetched = messages.Count,
-        parsed = parsedCount,
-        filteredOut = parsedCount - candidates.Count,
-        alreadyStored = candidates.Count - toEmbed.Count,
-        newlyStored = toEmbed.Count,
-        matches,
-    });
+    var summary = await ingestService.IngestAsync(cancellationToken);
+    return Results.Ok(summary);
 });
 
 // The real "score my whole archive" loop: routes/ranks every unscored posting in
