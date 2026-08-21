@@ -103,6 +103,7 @@ builder.Services.AddSingleton(new RunLock(Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JobLens", "run.lock")));
 builder.Services.AddSingleton<IngestService>();
 builder.Services.AddSingleton<PipelineRunner>();
+builder.Services.AddSingleton<ScheduledRunService>();
 builder.Services.AddSingleton<EvalHarness>();
 builder.Services.AddSingleton<IPostgresReadinessProbe, NpgsqlPostgresReadinessProbe>();
 builder.Services.AddSingleton<ISourceFreshnessProbe, SqliteSourceFreshnessProbe>();
@@ -162,6 +163,31 @@ if (args.Contains("--preflight", StringComparer.OrdinalIgnoreCase))
                 app.Services,
                 startupLogger,
                 cancellation.Token);
+        Environment.ExitCode = result.ExitCode;
+        await app.DisposeAsync();
+        return;
+    }
+    finally
+    {
+        Console.CancelKeyPress -= cancelHandler;
+    }
+}
+
+if (args.Contains("--run-once", StringComparer.OrdinalIgnoreCase))
+{
+    using var cancellation = new CancellationTokenSource();
+    ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+    {
+        eventArgs.Cancel = true;
+        cancellation.Cancel();
+    };
+    Console.CancelKeyPress += cancelHandler;
+
+    try
+    {
+        var result = await Program.RunOnceModeAsync(
+            app.Services,
+            cancellation.Token);
         Environment.ExitCode = result.ExitCode;
         await app.DisposeAsync();
         return;
@@ -387,6 +413,13 @@ public partial class Program
         ReportPreflight(result, logger);
         return result;
     }
+
+
+    public static Task<ScheduledRunResult> RunOnceModeAsync(
+        IServiceProvider services,
+        CancellationToken cancellationToken = default) =>
+        services.GetRequiredService<ScheduledRunService>()
+            .RunAsync(cancellationToken);
 
     public static void ReportPreflight(PreflightResult result, ILogger logger)
     {

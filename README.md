@@ -220,6 +220,69 @@ now-empty `run.lock` file is left in place rather than deleted - a persistent,
 zero-byte lock file on disk is the normal steady state between runs, not
 something to clean up.
 
+### One-shot scheduled run (`--run-once`)
+
+```
+dotnet run --project src/JobLens.Api -- --run-once
+```
+
+This is the unattended equivalent of "check the environment, then `POST /ingest`,
+then `POST /run`" - but it is one in-process operation, not three HTTP calls. It
+never starts a second JobLens process and never calls its own endpoints. The
+flow is:
+
+```
+acquire the shared run lock -> preflight -> ingest -> score the backlog
+  -> report -> exit
+```
+
+The lock above is the same `run.lock` `POST /ingest` and `POST /run` share, and
+one handle is held continuously across all three stages, so a scheduled run and
+a manual endpoint call can never interleave. Acquisition is immediate: if
+another run already holds the lock, this one does no preflight, no ingest, and
+no scoring, logs the conflict, and exits `2`. The command returns before the web
+host starts, so no Kestrel listener is left running afterwards.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Completed successfully. |
+| `1` | Fatal - preflight found a broken environment, or the run failed unexpectedly. Nothing downstream of the failure ran. |
+| `2` | Another pipeline run already holds the shared lock. Nothing ran. |
+| `3` | Completed, but degraded - see below. Ingest and scoring results are still valid and still persisted. |
+| `4` | Cancelled (Ctrl+C or host shutdown). Whatever finished before the cancellation is still reported. |
+
+Degraded (`3`) means the run finished and its work stands, but something needs
+attention:
+
+- **The WhatsApp bridge is down.** The bridge is only the writer into the local
+  SQLite store; if that store is still readable, ingest and scoring proceed
+  normally against it. You just are not getting *new* messages until the bridge
+  is back.
+- **Rezi authentication failed.** Scoring, matching, and notification results
+  are preserved in full; only automatic drafting was skipped. This is the case
+  that is invisible in `POST /run`'s JSON response - `--run-once` is where it
+  becomes a visible run outcome.
+- **A scoring call failed at the transport level** (OmniRoute unreachable or
+  timed out). The fail-soft scoring path still returns whatever it managed, and
+  the failure is reported per template rather than being swallowed into a
+  successful-looking empty run.
+- **The pipeline stopped early, or a recoverable per-posting drafting failure
+  occurred.** Neither is fatal; both are reported.
+
+A *stale* source (no recent message in the configured groups) is a warning only
+- it is reported but does not by itself make the run degraded, since a quiet
+group is normal. Likewise, ingesting zero new postings does not skip scoring:
+the backlog of already-stored-but-unscored postings is still scored.
+
+Standalone `--preflight` is unchanged by this: it stays read-only and never
+touches the lock, so it can be run safely while a pipeline run is in progress.
+
+PostgreSQL, the read-only WhatsApp bridge, OmniRoute, and Rezi authentication
+remain external prerequisites - `--run-once` checks them and reports on them,
+but never starts, stops, or authenticates any of them. Publishing the app and
+registering it with Windows Task Scheduler are a separate milestone;
+`--run-once` does not install, register, or schedule anything.
+
 ### Tailoring and export safety contract
 
 PostgreSQL is the source of truth for tailored drafts; Rezi is only a mutable
@@ -306,9 +369,9 @@ and export are fail-closed instead - any failure anywhere in either chain
 above produces zero writes and no status change, never a partial or
 best-effort one.
 
-257 tests pass (xUnit, non-live/default filter). Four integration test files -
-`EvalEndpointIntegrationTests`, `LlmRelevanceScorerIntegrationTests`,
-`PgvectorDatastoreIntegrationTests`, and
+The whole non-live test suite passes (xUnit, default filter). Four integration
+test files - `EvalEndpointIntegrationTests`,
+`LlmRelevanceScorerIntegrationTests`, `PgvectorDatastoreIntegrationTests`, and
 `PgvectorTailoredDraftStoreIntegrationTests` - need a live Postgres (the last
 two) or Postgres/Gemini/OmniRoute (the first two) connection and are excluded
 from that default filter (`--filter "Category!=Integration"`). The ingest,
