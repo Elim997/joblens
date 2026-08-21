@@ -27,6 +27,7 @@ public sealed class RealResumeClient(ITokenCache tokenCache, ILogger<RealResumeC
 
     private readonly SemaphoreSlim _connectLock = new(1, 1);
     private McpClient? _client;
+    private HttpClient? _httpClient;
 
     public async Task<IReadOnlyList<ResumeSummary>> ListResumesAsync(CancellationToken cancellationToken = default)
     {
@@ -87,7 +88,13 @@ public sealed class RealResumeClient(ITokenCache tokenCache, ILogger<RealResumeC
         await _connectLock.WaitAsync(cancellationToken);
         try
         {
-            _client ??= await ConnectAsync(cancellationToken);
+            if (_client is null)
+            {
+                var connection = await ConnectAsync(cancellationToken);
+                _client = connection.Client;
+                _httpClient = connection.HttpClient;
+            }
+
             return _client;
         }
         finally
@@ -96,7 +103,8 @@ public sealed class RealResumeClient(ITokenCache tokenCache, ILogger<RealResumeC
         }
     }
 
-    private async Task<McpClient> ConnectAsync(CancellationToken cancellationToken)
+    private async Task<(McpClient Client, HttpClient HttpClient)> ConnectAsync(
+        CancellationToken cancellationToken)
     {
         // Fail fast, before any network call, when there's no valid cached token - this is the
         // common case (never logged in yet, or the ~30-day token expired) and is what turns a
@@ -106,11 +114,23 @@ public sealed class RealResumeClient(ITokenCache tokenCache, ILogger<RealResumeC
             throw new ReziAuthenticationRequiredException();
 
         var httpClient = new HttpClient();
-        var transport = ReziMcpConnection.CreateTransport(httpClient, tokenCache, RefuseInteractiveLoginAsync);
-        return await McpClient.CreateAsync(
-            transport,
-            clientOptions: new() { ProtocolVersion = ReziMcpConnection.ProtocolVersion },
-            cancellationToken: cancellationToken);
+        try
+        {
+            var transport = ReziMcpConnection.CreateTransport(
+                httpClient,
+                tokenCache,
+                RefuseInteractiveLoginAsync);
+            var client = await McpClient.CreateAsync(
+                transport,
+                clientOptions: new() { ProtocolVersion = ReziMcpConnection.ProtocolVersion },
+                cancellationToken: cancellationToken);
+            return (client, httpClient);
+        }
+        catch
+        {
+            httpClient.Dispose();
+            throw;
+        }
     }
 
     private static bool IsExpired(TokenContainer tokens) =>
@@ -125,7 +145,15 @@ public sealed class RealResumeClient(ITokenCache tokenCache, ILogger<RealResumeC
 
     public async ValueTask DisposeAsync()
     {
-        if (_client is not null)
-            await _client.DisposeAsync();
+        try
+        {
+            if (_client is not null)
+                await _client.DisposeAsync();
+        }
+        finally
+        {
+            _httpClient?.Dispose();
+            _connectLock.Dispose();
+        }
     }
 }

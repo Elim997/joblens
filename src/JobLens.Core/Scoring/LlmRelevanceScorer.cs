@@ -2,6 +2,7 @@ using System.Text.Json;
 using JobLens.Core.Configuration;
 using JobLens.Core.Llm;
 using JobLens.Core.Parsing;
+using JobLens.Core.Pipeline;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -18,8 +19,14 @@ public class LlmRelevanceScorer(
 
     private IChatClient ChatClient => scoringChatClient.ChatClient;
 
+    public Task<IReadOnlyList<ScoredPosting>> ScoreAsync(
+        IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)> candidates,
+        CancellationToken cancellationToken = default) =>
+        ScoreAsync(candidates, NullRunObserver.Instance, cancellationToken);
+
     public async Task<IReadOnlyList<ScoredPosting>> ScoreAsync(
         IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)> candidates,
+        IRunObserver observer,
         CancellationToken cancellationToken = default)
     {
         if (candidates.Count == 0)
@@ -62,7 +69,13 @@ public class LlmRelevanceScorer(
         foreach (var group in routed.GroupBy(r => r.Template))
         {
             var shortlist = group.Select(g => (g.Id, g.Posting)).ToList();
-            var groupResults = await ScoreGroupAsync(group.Key.Name, group.Key.Profile, shortlist, chatOptions, cancellationToken);
+            var groupResults = await ScoreGroupAsync(
+                group.Key.Name,
+                group.Key.Profile,
+                shortlist,
+                chatOptions,
+                observer,
+                cancellationToken);
             results.AddRange(groupResults);
         }
 
@@ -74,6 +87,7 @@ public class LlmRelevanceScorer(
         string profile,
         IReadOnlyList<(string Id, JobPosting Posting)> shortlist,
         ChatOptions chatOptions,
+        IRunObserver observer,
         CancellationToken cancellationToken)
     {
         var messages = BuildPrompt(profile, shortlist.Select(s => s.Posting).ToList());
@@ -95,6 +109,18 @@ public class LlmRelevanceScorer(
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            observer.ScoringTransportFailed(templateName, ex);
+            LogTransportFailure(ex);
+            return [];
+        }
+        catch (HttpRequestException ex)
+        {
+            observer.ScoringTransportFailed(templateName, ex);
+            LogTransportFailure(ex);
+            return [];
         }
         catch (Exception ex)
         {
@@ -149,6 +175,13 @@ public class LlmRelevanceScorer(
         }
 
         return results;
+
+        void LogTransportFailure(Exception exception) =>
+            logger.LogWarning(
+                exception,
+                "Scoring transport failed for template '{Template}'; returning no matches for this group of {Count}.",
+                templateName,
+                shortlist.Count);
     }
 
     private static IReadOnlyList<ChatMessage> BuildPrompt(string profile, IReadOnlyList<JobPosting> shortlist)

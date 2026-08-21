@@ -1,6 +1,7 @@
 using JobLens.Core.Configuration;
 using JobLens.Core.Llm;
 using JobLens.Core.Parsing;
+using JobLens.Core.Pipeline;
 using JobLens.Core.Scoring;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -157,7 +158,7 @@ public class LlmRelevanceScorerTests
     }
 
     [Fact]
-    public async Task ScoreAsync_OneTemplateGroupFailsSoft_OtherGroupStillReturnsScores()
+    public async Task ScoreAsync_OneTemplateGroupTransportFails_OtherGroupReturnsScoresAndFailureIsReported()
     {
         var chatClient = new FakeChatClient(
             new HttpRequestException("Backend provider failure"),
@@ -168,13 +169,18 @@ public class LlmRelevanceScorerTests
         var scorer = CreateScorer(chatClient, templateCatalog: catalog);
         var backend = MakeCandidate("Backend Job", [1f, 0f, 0f]);
         var qa = MakeCandidate("QA Job", [0f, 1f, 0f]);
+        var collector = new RunDetailCollector();
 
-        var results = await scorer.ScoreAsync([backend, qa]);
+        var results = await scorer.ScoreAsync([backend, qa], collector);
 
         var result = Assert.Single(results);
         Assert.Equal(qa.Id, result.Id);
         Assert.Equal("QA", result.TemplateName);
         Assert.Equal(2, chatClient.CallCount);
+        var failure = Assert.Single(collector.ScoringTransportFailures);
+        Assert.Equal("Backend", failure.TemplateName);
+        Assert.Equal(nameof(HttpRequestException), failure.ExceptionType);
+        Assert.Equal("Backend provider failure", failure.Message);
     }
 
     [Fact]
@@ -224,17 +230,19 @@ public class LlmRelevanceScorerTests
     }
 
     [Fact]
-    public async Task ScoreAsync_InvalidJsonTwice_ReturnsEmptyWithoutThrowing()
+    public async Task ScoreAsync_InvalidJsonTwice_ReturnsEmptyWithoutTransportFailure()
     {
         var chatClient = new FakeChatClient("not json", "still not json");
         var scorer = CreateScorer(chatClient);
+        var collector = new RunDetailCollector();
 
         var candidates = new List<(string, JobPosting, float[])> { MakeCandidate("Only Candidate", [1f, 0f, 0f]) };
 
-        var results = await scorer.ScoreAsync(candidates);
+        var results = await scorer.ScoreAsync(candidates, collector);
 
         Assert.Empty(results);
         Assert.Equal(2, chatClient.CallCount); // retried once, then gave up - no third attempt
+        Assert.Empty(collector.ScoringTransportFailures);
     }
 
     [Theory]
@@ -327,29 +335,68 @@ public class LlmRelevanceScorerTests
         Assert.Equal("Second Item", result.Posting.Title);
     }
 
-    [Fact]
-    public async Task ScoreAsync_TransportFailure_ReturnsEmptyWithoutRetrying()
+    [Theory]
+    [InlineData("http")]
+    [InlineData("operation-canceled")]
+    [InlineData("task-canceled")]
+    public async Task ScoreAsync_TransportFailure_ReportsAndReturnsEmptyWithoutRetrying(
+        string failureKind)
     {
-        var chatClient = new FakeChatClient(new HttpRequestException("OmniRoute unavailable"));
+        Exception exception = failureKind switch
+        {
+            "http" => new HttpRequestException("OmniRoute unavailable"),
+            "operation-canceled" => new OperationCanceledException("OmniRoute timed out"),
+            "task-canceled" => new TaskCanceledException("SDK request timed out"),
+            _ => throw new ArgumentOutOfRangeException(nameof(failureKind)),
+        };
+        var chatClient = new FakeChatClient(exception);
         var scorer = CreateScorer(chatClient);
+        var collector = new RunDetailCollector();
 
-        var results = await scorer.ScoreAsync([MakeCandidate("Candidate", [1f, 0f, 0f])]);
+        var results = await scorer.ScoreAsync(
+            [MakeCandidate("Candidate", [1f, 0f, 0f])],
+            collector);
 
         Assert.Empty(results);
         Assert.Equal(1, chatClient.CallCount);
+        var failure = Assert.Single(collector.ScoringTransportFailures);
+        Assert.Equal("General", failure.TemplateName);
+        Assert.Equal(exception.GetType().Name, failure.ExceptionType);
+        Assert.Equal(exception.Message, failure.Message);
     }
 
     [Fact]
-    public async Task ScoreAsync_CallerCancellation_Propagates()
+    public async Task ScoreAsync_GenericFailure_IsFailSoftWithoutTransportFailure()
+    {
+        var chatClient = new FakeChatClient(new InvalidOperationException("Unexpected failure"));
+        var scorer = CreateScorer(chatClient);
+        var collector = new RunDetailCollector();
+
+        var results = await scorer.ScoreAsync(
+            [MakeCandidate("Candidate", [1f, 0f, 0f])],
+            collector);
+
+        Assert.Empty(results);
+        Assert.Equal(1, chatClient.CallCount);
+        Assert.Empty(collector.ScoringTransportFailures);
+    }
+
+    [Fact]
+    public async Task ScoreAsync_CallerCancellation_PropagatesWithoutTransportFailure()
     {
         var chatClient = new FakeChatClient();
         var scorer = CreateScorer(chatClient);
+        var collector = new RunDetailCollector();
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
-            scorer.ScoreAsync([MakeCandidate("Candidate", [1f, 0f, 0f])], cancellation.Token));
+            scorer.ScoreAsync(
+                [MakeCandidate("Candidate", [1f, 0f, 0f])],
+                collector,
+                cancellation.Token));
 
         Assert.Equal(0, chatClient.CallCount);
+        Assert.Empty(collector.ScoringTransportFailures);
     }
 }

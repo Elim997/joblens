@@ -48,13 +48,14 @@ public class PipelineRunnerTests
         int matchThreshold = 70,
         int autoTailorThreshold = 91,
         FakeResumeTailor? tailor = null,
-        FakeTailoredDraftStore? draftStore = null)
+        FakeTailoredDraftStore? draftStore = null,
+        IReadOnlyList<BaseResumeConfig>? baseResumes = null)
     {
         tailor ??= new FakeResumeTailor(new InvalidOperationException("Auto-tailoring should not run in this test."));
         draftStore ??= new FakeTailoredDraftStore();
         var reziOptions = Options.Create(new ReziOptions
         {
-            BaseResumes = [new BaseResumeConfig { Id = BaseResumeId, Name = TemplateName }],
+            BaseResumes = baseResumes?.ToList() ?? [new BaseResumeConfig { Id = BaseResumeId, Name = TemplateName }],
         });
         var draftService = new TailoredDraftService(datastore, tailor, draftStore, reziOptions);
 
@@ -673,5 +674,255 @@ public class PipelineRunnerTests
         Assert.Equal(1, summary.Notified);
         Assert.Single(notifier.Calls);
         Assert.Single(notifier.Calls[0]);
+    }
+
+    [Fact]
+    public async Task RunAsync_WithCollector_ReportsNotificationOrderAndDraftOutcomes()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-created", MakePosting("Created"), [1f, 0f, 0f]);
+        datastore.Seed("id-reused", MakePosting("Reused"), [1f, 0f, 0f]);
+        datastore.Seed("id-not-attempted", MakePosting("Not Attempted"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(
+                c.Id,
+                c.Posting,
+                c.Id == "id-not-attempted" ? 75 : 90,
+                "reason",
+                TemplateName)).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var draftStore = new FakeTailoredDraftStore();
+        draftStore.Seed(new TailoredDraft(
+            "existing-draft",
+            "id-reused",
+            90,
+            TemplateName,
+            BaseResumeId,
+            TemplateName,
+            "Existing summary.",
+            [new TailoredExperienceItem("exp-1", "Existing experience.")],
+            [new TailoredSkillItem("skill-1", "Existing skill.")],
+            "Existing rationale.",
+            TailoredDraftStatus.Draft,
+            DateTimeOffset.UtcNow,
+            null));
+        var runner = CreateRunner(
+            datastore,
+            scorer,
+            notifier,
+            matchThreshold: 70,
+            autoTailorThreshold: 80,
+            tailor: tailor,
+            draftStore: draftStore);
+        var collector = new RunDetailCollector();
+
+        var summary = await runner.RunAsync(collector);
+
+        Assert.Equal(3, summary.Notified);
+        Assert.Collection(
+            collector.Matches,
+            detail =>
+            {
+                Assert.Equal("id-created", detail.MessageId);
+                Assert.Equal("Created", detail.Title);
+                Assert.Equal(DraftOutcomes.Created, detail.DraftOutcome);
+                Assert.NotNull(detail.DraftId);
+            },
+            detail =>
+            {
+                Assert.Equal("id-reused", detail.MessageId);
+                Assert.Equal(DraftOutcomes.Reused, detail.DraftOutcome);
+                Assert.Equal("existing-draft", detail.DraftId);
+            },
+            detail =>
+            {
+                Assert.Equal("id-not-attempted", detail.MessageId);
+                Assert.Equal(DraftOutcomes.NotAttempted, detail.DraftOutcome);
+                Assert.Null(detail.DraftId);
+            });
+    }
+
+    [Fact]
+    public async Task RunAsync_WithCollector_DedupSuppressedMatchHasNoDetailButCanReportRunWideAuthFailure()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-notified", MakePosting("First", "Acme", "https://example.com/job"), [1f, 0f, 0f]);
+        datastore.Seed("id-suppressed", MakePosting("Repost", "Acme", "https://example.com/job"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", TemplateName)).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(posting =>
+            posting.Title == "Repost"
+                ? throw new ReziAuthenticationRequiredException()
+                : MakeTailored());
+        var runner = CreateRunner(
+            datastore,
+            scorer,
+            notifier,
+            matchThreshold: 70,
+            autoTailorThreshold: 80,
+            tailor: tailor);
+        var collector = new RunDetailCollector();
+
+        var summary = await runner.RunAsync(collector);
+
+        Assert.Equal(2, summary.Matched);
+        Assert.Equal(1, summary.Notified);
+        Assert.Equal(1, summary.DraftsCreated);
+        Assert.Equal(1, summary.TailoringFailures);
+        Assert.Equal("id-notified", Assert.Single(collector.Matches).MessageId);
+        Assert.NotNull(collector.ReziAuthenticationError);
+        Assert.Equal(2, tailor.CallCount);
+    }
+
+    [Fact]
+    public async Task RunAsync_NotificationFailure_RegistersNoDetails()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-1", MakePosting("Notify Failure"), [1f, 0f, 0f]);
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 75, "reason", TemplateName)).ToList());
+        var notifier = new ThrowingNotifier(new InvalidOperationException("Notification unavailable."));
+        var draftService = new TailoredDraftService(
+            datastore,
+            new FakeResumeTailor(new InvalidOperationException("must not run")),
+            new FakeTailoredDraftStore(),
+            Options.Create(new ReziOptions
+            {
+                BaseResumes = [new BaseResumeConfig { Id = BaseResumeId, Name = TemplateName }],
+            }));
+        var runner = new PipelineRunner(
+            datastore,
+            scorer,
+            notifier,
+            draftService,
+            Options.Create(new JobLensOptions { MatchThreshold = 70, AutoTailorThreshold = 80 }),
+            NullLogger<PipelineRunner>.Instance);
+        var collector = new RunDetailCollector();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(collector));
+
+        Assert.Empty(collector.Matches);
+        Assert.Empty(datastore.ScoredMessageIds);
+    }
+
+    [Fact]
+    public async Task RunAsync_ReziAuthenticationFailure_SkipsLaterValidTemplatesButChecksNoTemplateFirst()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-auth", MakePosting("Auth Failure"), [1f, 0f, 0f]);
+        datastore.Seed("id-no-template", MakePosting("No Template"), [1f, 0f, 0f]);
+        datastore.Seed("id-skipped", MakePosting("Skipped Auth"), [1f, 0f, 0f]);
+
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(
+                c.Id,
+                c.Posting,
+                90,
+                "reason",
+                c.Id == "id-no-template" ? "Removed Template" : TemplateName)).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(new ReziAuthenticationRequiredException());
+        var runner = CreateRunner(
+            datastore,
+            scorer,
+            notifier,
+            matchThreshold: 70,
+            autoTailorThreshold: 80,
+            tailor: tailor);
+        var collector = new RunDetailCollector();
+
+        var summary = await runner.RunAsync(collector);
+
+        Assert.Equal(1, summary.TailoringFailures);
+        Assert.Equal(1, tailor.CallCount);
+        Assert.NotNull(collector.ReziAuthenticationError);
+        Assert.Collection(
+            collector.Matches,
+            detail =>
+            {
+                Assert.Equal("id-auth", detail.MessageId);
+                Assert.Equal(DraftOutcomes.Failed, detail.DraftOutcome);
+            },
+            detail =>
+            {
+                Assert.Equal("id-no-template", detail.MessageId);
+                Assert.Equal("Removed Template", detail.SelectedTemplate);
+                Assert.Equal(DraftOutcomes.NoTemplate, detail.DraftOutcome);
+            },
+            detail =>
+            {
+                Assert.Equal("id-skipped", detail.MessageId);
+                Assert.Equal(DraftOutcomes.SkippedAuth, detail.DraftOutcome);
+            });
+    }
+
+    [Fact]
+    public async Task RunAsync_NullTemplateName_ReportsNoTemplateWithoutTailoringFailure()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-null-template", MakePosting("Legacy"), [1f, 0f, 0f]);
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", null!)).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(new InvalidOperationException("must not run"));
+        var runner = CreateRunner(
+            datastore,
+            scorer,
+            notifier,
+            matchThreshold: 70,
+            autoTailorThreshold: 80,
+            tailor: tailor);
+        var collector = new RunDetailCollector();
+
+        var summary = await runner.RunAsync(collector);
+
+        Assert.Equal(0, summary.TailoringFailures);
+        Assert.Equal(0, tailor.CallCount);
+        var detail = Assert.Single(collector.Matches);
+        Assert.Null(detail.SelectedTemplate);
+        Assert.Equal(DraftOutcomes.NoTemplate, detail.DraftOutcome);
+    }
+
+    [Fact]
+    public async Task RunAsync_OrdinaryTailoringFailure_ReportsFailedAndContinues()
+    {
+        var datastore = new FakeDatastore();
+        datastore.Seed("id-failed", MakePosting("Fails"), [1f, 0f, 0f]);
+        datastore.Seed("id-created", MakePosting("Succeeds"), [1f, 0f, 0f]);
+        var scorer = new FakeRelevanceScorer(candidates =>
+            candidates.Select(c => new ScoredPosting(c.Id, c.Posting, 90, "reason", TemplateName)).ToList());
+        var notifier = new FakeNotifier();
+        var tailor = new FakeResumeTailor(posting =>
+            posting.Title == "Fails"
+                ? throw new TailoringModelUnavailableException("Model unavailable.")
+                : MakeTailored());
+        var runner = CreateRunner(
+            datastore,
+            scorer,
+            notifier,
+            matchThreshold: 70,
+            autoTailorThreshold: 80,
+            tailor: tailor);
+        var collector = new RunDetailCollector();
+
+        var summary = await runner.RunAsync(collector);
+
+        Assert.Equal(1, summary.TailoringFailures);
+        Assert.Equal(1, summary.DraftsCreated);
+        Assert.Equal(DraftOutcomes.Failed, collector.Matches[0].DraftOutcome);
+        Assert.Equal(DraftOutcomes.Created, collector.Matches[1].DraftOutcome);
+        Assert.Equal(["id-created", "id-failed"], datastore.ScoredMessageIds.OrderBy(id => id));
+    }
+
+    private sealed class ThrowingNotifier(Exception exception) : JobLens.Core.Notification.INotifier
+    {
+        public Task NotifyAsync(
+            IReadOnlyList<ScoredPosting> matches,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException(exception);
     }
 }

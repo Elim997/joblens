@@ -1,4 +1,5 @@
 using JobLens.Core.Parsing;
+using JobLens.Core.Pipeline;
 
 namespace JobLens.Core.Scoring;
 
@@ -22,4 +23,10 @@ public interface IRelevanceScorer
     Task<IReadOnlyList<ScoredPosting>> ScoreAsync(
         IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)> candidates,
         CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ScoredPosting>> ScoreAsync(
+        IReadOnlyList<(string Id, JobPosting Posting, float[] Embedding)> candidates,
+        IRunObserver observer,
+        CancellationToken cancellationToken = default) =>
+        ScoreAsync(candidates, cancellationToken);
 }

@@ -51,6 +51,82 @@ public class TailoredDraftServiceTests
         string name = TemplateName) =>
         new() { Id = id, Name = name };
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("Missing Template")]
+    public void TryResolveBaseResume_MissingOrBlankTemplateReturnsFalse(
+        string? selectedTemplate)
+    {
+        var datastore = new FakeDatastore();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var store = new FakeTailoredDraftStore();
+        var service = CreateService(datastore, tailor, store, MakeBase());
+
+        var resolved = service.TryResolveBaseResume(
+            selectedTemplate,
+            out var baseResumeId,
+            out var baseResumeName);
+
+        Assert.False(resolved);
+        Assert.Empty(baseResumeId);
+        Assert.Empty(baseResumeName);
+        Assert.Equal(0, tailor.CallCount);
+        Assert.Equal(0, store.CreateOrGetCallCount);
+        Assert.Empty(store.Drafts);
+    }
+
+    [Fact]
+    public void TryResolveBaseResume_TrimmedCaseInsensitiveMatchReturnsTrimmedMapping()
+    {
+        var datastore = new FakeDatastore();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var store = new FakeTailoredDraftStore();
+        var service = CreateService(
+            datastore,
+            tailor,
+            store,
+            MakeBase("  qa-base-id  ", "  QA Automation Developer  "));
+
+        var resolved = service.TryResolveBaseResume(
+            "  qa automation developer  ",
+            out var baseResumeId,
+            out var baseResumeName);
+
+        Assert.True(resolved);
+        Assert.Equal(BaseId, baseResumeId);
+        Assert.Equal(TemplateName, baseResumeName);
+        Assert.Equal(0, tailor.CallCount);
+        Assert.Equal(0, store.CreateOrGetCallCount);
+        Assert.Empty(store.Drafts);
+    }
+
+    [Fact]
+    public void TryResolveBaseResume_BlankConfiguredIdReturnsFalse()
+    {
+        var datastore = new FakeDatastore();
+        var tailor = new FakeResumeTailor(MakeTailored());
+        var store = new FakeTailoredDraftStore();
+        var service = CreateService(
+            datastore,
+            tailor,
+            store,
+            MakeBase("   ", TemplateName));
+
+        var resolved = service.TryResolveBaseResume(
+            TemplateName,
+            out var baseResumeId,
+            out var baseResumeName);
+
+        Assert.False(resolved);
+        Assert.Empty(baseResumeId);
+        Assert.Empty(baseResumeName);
+        Assert.Equal(0, tailor.CallCount);
+        Assert.Equal(0, store.CreateOrGetCallCount);
+        Assert.Empty(store.Drafts);
+    }
+
     [Fact]
     public async Task CreateOrGetAsync_UsesPersistedTemplateAndPersistsValidatedSnapshots()
     {

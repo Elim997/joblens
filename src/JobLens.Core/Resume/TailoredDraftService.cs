@@ -19,6 +19,35 @@ public class TailoredDraftService(
     ITailoredDraftStore draftStore,
     IOptions<ReziOptions> options)
 {
+    /// <summary>
+    /// Resolves a persisted scoring-template name to its configured Rezi base resume without
+    /// reading a posting, calling a model or Rezi, or touching the draft store. Returns false for
+    /// missing templates and configuration drift so automatic runs can skip before attempting;
+    /// CreateOrGetAsync continues to fail closed for the manual endpoint.
+    /// </summary>
+    public bool TryResolveBaseResume(
+        string? selectedTemplate,
+        out string baseResumeId,
+        out string baseResumeName)
+    {
+        baseResumeId = string.Empty;
+        baseResumeName = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(selectedTemplate))
+            return false;
+
+        var trimmed = selectedTemplate.Trim();
+        var match = options.Value.BaseResumes.FirstOrDefault(b =>
+            string.Equals(b.Name?.Trim(), trimmed, StringComparison.OrdinalIgnoreCase));
+
+        if (match is null || string.IsNullOrWhiteSpace(match.Id))
+            return false;
+
+        baseResumeId = match.Id.Trim();
+        baseResumeName = match.Name.Trim();
+        return true;
+    }
+
     /// <summary>Null means no stored posting for messageId - the caller turns that into a 404.</summary>
     public async Task<TailoredDraftResult?> CreateOrGetAsync(string messageId, CancellationToken cancellationToken = default)
     {
@@ -76,14 +105,10 @@ public class TailoredDraftService(
     /// </summary>
     private (string Id, string Name) ResolveBaseResume(string selectedTemplate)
     {
-        var trimmed = selectedTemplate.Trim();
-        var match = options.Value.BaseResumes.FirstOrDefault(b =>
-            string.Equals(b.Name?.Trim(), trimmed, StringComparison.OrdinalIgnoreCase));
-
-        if (match is null || string.IsNullOrWhiteSpace(match.Id))
+        if (!TryResolveBaseResume(selectedTemplate, out var baseResumeId, out var baseResumeName))
             throw new ScoringTemplateResumeMappingException(selectedTemplate);
 
-        return (match.Id.Trim(), match.Name.Trim());
+        return (baseResumeId, baseResumeName);
     }
 }
 

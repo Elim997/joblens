@@ -60,7 +60,12 @@ public class PipelineRunner(
     IOptions<JobLensOptions> options,
     ILogger<PipelineRunner> logger)
 {
-    public async Task<RunSummary> RunAsync(CancellationToken cancellationToken = default)
+    public Task<RunSummary> RunAsync(CancellationToken cancellationToken = default) =>
+        RunAsync(NullRunObserver.Instance, cancellationToken);
+
+    public async Task<RunSummary> RunAsync(
+        IRunObserver observer,
+        CancellationToken cancellationToken = default)
     {
         var batches = 0;
         var totalScored = 0;
@@ -71,6 +76,7 @@ public class PipelineRunner(
         var totalTailoringFailures = 0;
         var stoppedEarly = false;
         string? stopReason = null;
+        var reziAuthKnownBroken = false;
 
         // Owned by the whole run, not per batch, so a repost scored in a later batch than
         // its duplicate is still recognized and never double-notified.
@@ -89,7 +95,7 @@ public class PipelineRunner(
             // Template routing (which scoring template each candidate is scored against) is
             // resolved locally inside the scorer, per-candidate, from its own catalog - no
             // profile embedding is fetched here anymore.
-            var scored = await scorer.ScoreAsync(candidates, cancellationToken);
+            var scored = await scorer.ScoreAsync(candidates, observer, cancellationToken);
             batches++;
 
             if (scored.Count == 0)
@@ -117,6 +123,11 @@ public class PipelineRunner(
             {
                 await notifier.NotifyAsync(toNotify, cancellationToken);
                 totalNotified += toNotify.Count;
+
+                // Register only after the notification succeeds. The collector appends in this
+                // exact order and later draft callbacks update those same rows in place.
+                foreach (var match in toNotify)
+                    observer.MatchNotified(match);
             }
 
             // Mark everything the model actually scored (matched or not) - not the whole
@@ -130,30 +141,104 @@ public class PipelineRunner(
 
             totalScored += scored.Count;
 
-            // Automatic drafting: every posting >= AutoTailorThreshold in this batch, not just
-            // the notification-deduped toNotify subset - draft eligibility is a per-posting
-            // score threshold, independent of cross-run notification dedup. Runs after
-            // MarkScoredAsync because TailoredDraftService requires the posting's score/template
-            // to already be persisted. Fail-soft: one posting's tailoring failure is logged and
-            // counted, never discards its already-persisted score/match, and never stops the
-            // rest of this batch or run - except for cancellation, which always propagates.
+            // Matches below AutoTailorThreshold keep the collector's initial NotAttempted
+            // outcome. Automatic drafting remains independent from notification dedup and runs
+            // for every eligible posting in the batch.
             foreach (var match in matches.Where(m => m.Score >= options.Value.AutoTailorThreshold))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                // MarkScoredAsync above persisted exactly this template name, and F2's run lock
+                // excludes a concurrent writer, so the in-memory value is the persisted value -
+                // no re-read. CreateOrGetAsync still loads the row itself when it actually runs.
+                var selectedTemplate = match.TemplateName;
+
+                // Reachable via config drift: the scoring template catalog and ReziOptions'
+                // base resumes are independent config, so a routed template can have no
+                // configured base. Reported as NoTemplate before the run-wide auth flag is
+                // consulted, and no draft-service/model/Rezi call is attempted.
+                if (!draftService.TryResolveBaseResume(
+                        selectedTemplate,
+                        out _,
+                        out _))
+                {
+                    observer.DraftResolved(
+                        match.Id,
+                        selectedTemplate,
+                        DraftOutcomes.NoTemplate);
+                    continue;
+                }
+
+                if (reziAuthKnownBroken)
+                {
+                    observer.DraftResolved(
+                        match.Id,
+                        selectedTemplate,
+                        DraftOutcomes.SkippedAuth);
+                    continue;
+                }
+
                 try
                 {
                     var result = await draftService.CreateOrGetAsync(match.Id, cancellationToken);
                     if (result is null)
-                        continue; // Not expected (just scored), but not a failure either.
+                    {
+                        // Unreachable in principle: MarkScoredAsync persisted this posting
+                        // moments ago and the run lock excludes a concurrent deleter. Logged at
+                        // Error with its own message so that if it ever does fire, it is
+                        // distinguishable from an ordinary tailoring failure rather than
+                        // vanishing into the TailoringFailures count.
+                        totalTailoringFailures++;
+                        observer.DraftResolved(
+                            match.Id,
+                            selectedTemplate,
+                            DraftOutcomes.Failed);
+                        logger.LogError(
+                            "Automatic tailoring found no stored posting for messageId {MessageId} immediately after marking it scored; this should be impossible and indicates the posting row was removed mid-run.",
+                            match.Id);
+                        continue;
+                    }
 
                     if (result.WasCreated)
+                    {
                         totalDraftsCreated++;
+                        observer.DraftResolved(
+                            match.Id,
+                            selectedTemplate,
+                            DraftOutcomes.Created,
+                            result.Draft.Id);
+                    }
                     else
+                    {
                         totalDraftsReused++;
+                        observer.DraftResolved(
+                            match.Id,
+                            selectedTemplate,
+                            DraftOutcomes.Reused,
+                            result.Draft.Id);
+                    }
+                }
+                catch (ReziAuthenticationRequiredException ex)
+                {
+                    totalTailoringFailures++;
+                    reziAuthKnownBroken = true;
+                    observer.ReziAuthenticationFailed(ex.Message);
+                    observer.DraftResolved(
+                        match.Id,
+                        selectedTemplate,
+                        DraftOutcomes.Failed);
+                    logger.LogWarning(
+                        ex,
+                        "Automatic tailoring requires Rezi authentication for messageId {MessageId}; later eligible postings in this run will be skipped.",
+                        match.Id);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     totalTailoringFailures++;
+                    observer.DraftResolved(
+                        match.Id,
+                        selectedTemplate,
+                        DraftOutcomes.Failed);
                     logger.LogWarning(
                         ex,
                         "Automatic tailoring failed for messageId {MessageId}; its score/match is already persisted.",
