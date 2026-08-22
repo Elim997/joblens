@@ -40,8 +40,8 @@ go run main.go
 - Open `whatsapp-bridge/store/messages.db` with DB Browser for SQLite or the
   `sqlite3` CLI.
 - Tables: `chats` and `messages`.
-- One job group's `chat_jid` is `120363427094606388@g.us`. Put every group you
-  want ingested in `JobLens:GroupChatJids` (a list - see step 5).
+- A job group's `chat_jid` looks like `<whatsapp-group-chat-jid>`. Put every group
+  you want ingested in `JobLens:GroupChatJids` (a list - see step 5).
 - Do NOT filter by sender: about 650 posts share the group's own id, so sender
   does not separate jobs from promos. `IJobFeedSource` filters by
   `WHERE chat_jid IN (...)` and skips media-only rows; job vs promo is a
@@ -121,7 +121,7 @@ dotnet user-secrets set "Llm:ScoringModel" "coding-fallback" --project src/JobLe
 dotnet user-secrets set "Llm:TailoringModel" "cc/claude-sonnet-5" --project src/JobLens.Api
 dotnet user-secrets set "Postgres:ConnectionString" "Host=localhost;Port=5432;Database=joblens;Username=postgres;Password=postgres"
 dotnet user-secrets set "JobLens:MessagesDbPath" "C:/path/to/whatsapp-mcp/whatsapp-bridge/store/messages.db"
-dotnet user-secrets set "JobLens:GroupChatJids:0" "120363427094606388@g.us"
+dotnet user-secrets set "JobLens:GroupChatJids:0" "<whatsapp-group-chat-jid>"
 dotnet user-secrets set "JobLens:GroupChatJids:1" "<second_group_chat_jid>"
 dotnet user-secrets set "Rezi:BaseResumes:0:Name" "QA Automation Developer"
 dotnet user-secrets set "Rezi:BaseResumes:0:Id" "<qa_automation_developer_resume_id>"
@@ -145,9 +145,12 @@ because a chat_jid identifies a real WhatsApp group.
 `Rezi:BaseResumes` is likewise a list in user-secrets, not appsettings - the IDs
 identify resumes in one specific Rezi account. `IResumeTailor` reads
 these bases and picks the best-fit one per posting; it never writes to
-them. `ForEditResumeId` is the only slot `/tailor?commit=true` ever writes to -
-see README.md's `/tailor` safety contract. Find your own
-resume IDs with `list_resumes` via `dotnet run --project tools/ReziLogin`
+them. `POST /tailor?messageId=X` only creates or reuses an immutable persisted
+draft and performs zero Rezi writes. `Rezi:ForEditResumeId` is the sole Rezi
+slot that `POST /tailored/{draftId}/export-to-rezi` can update, and export happens
+only through that explicit endpoint. See README.md's tailoring/export safety
+contract. Find your own resume IDs with `list_resumes` via
+`dotnet run --project tools/ReziLogin`
 (prints resume names next to their ids) after completing the re-login in
 section 7 below.
 
@@ -232,7 +235,7 @@ OmniRoute's Chat Completions compatibility vs. what's still intended-only).
   2. `IJobFeedSource` reading `messages.db`, filtered to the group chat_jids
   3. parser + category filter
   4. embed + store in pgvector, plus the semantic `query` command
-  5. relevance scoring (vector prefilter, then Claude)
+  5. relevance scoring (vector prefilter, then `IScoringChatClient` through OmniRoute)
   6. notify on matches
   7. eval harness
 - Give Claude Code the `messages.db` path and let it inspect the schema for the

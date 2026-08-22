@@ -387,8 +387,6 @@ milestone's new explicit-export endpoint.
   tighter match signal.
 - **Telegram as a second source** - `IJobFeedSource` is already source-agnostic;
   this is a new implementation, not a redesign.
-- **Loop-until-empty `/run`** - currently scores one top-K batch per call rather
-  than draining the whole unscored backlog in one request.
 - **Further Rezi tailoring guardrails and enhancements** - e.g. resume-format-aware
   writes and cover-letter tailoring on top of the current summary/experience/skills
   rewrite.
